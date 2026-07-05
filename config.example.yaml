@@ -1,0 +1,49 @@
+# Visimics Autopilot — конфіг. Скопіюй у config.yaml і заповни.
+shop:
+  name: "Vision Dynamics"
+  url: "https://visimics.com.ua"
+  currency: "UAH"
+  commission: 0.08          # комісія Prom для контролю маржі
+
+# ПРАВИЛО НАЦІНКИ — заміни на своє. Ключ = категорія.
+markup:
+  Аксесуари: 1.6
+  Килимки: 1.5
+  Підсвітка: 1.5
+  Хімія: 1.3
+  Запчастини: 1.35
+  Мото: 1.2
+  default: 1.4
+  floor: 1.16               # мінімум (беззбитковість + буфер)
+
+# ПОСТАЧАЛЬНИКИ. Кожен: як заходять дані (email/api/file), бренд, мапа колонок.
+suppliers:
+  bmparts:
+    brand: "BMW"
+    type: "api"             # api | email | file
+    api_base: "https://api.bmparts.example"   # реальний — з доків BM Parts
+    token_env: "BMPARTS_TOKEN"
+    staged: true            # поетапне завантаження (спершу наявність+історія)
+  autonova:
+    brand: "multi"
+    type: "email"
+    email_from: "price@autonova.example"
+    attachment_glob: "*.xlsx"
+    columns: {article: 0, name: 1, qty: 2, cost: 3}
+  vag:
+    brand: "VW/Audi"
+    type: "email"
+    email_from: "price@vag.example"
+    columns: {article: 0, name: 1, qty: 2, cost: 3}
+
+# ПОШТА (IMAP) — для авто-забору прайсів із листів.
+email:
+  host: "imap.gmail.com"
+  user_env: "MAIL_USER"
+  password_env: "MAIL_PASS"     # app-password, у секретах, НЕ в коді
+  folder: "INBOX"
+  since_days: 3
+
+# ВИХІД
+output:
+  yml_path: "feed/prom.yml"     # цей файл хоститься за URL, Prom тягне його

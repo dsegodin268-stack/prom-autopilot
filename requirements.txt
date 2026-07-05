@@ -1,0 +1,5 @@
+pandas
+openpyxl
+PyYAML
+gspread
+playwright

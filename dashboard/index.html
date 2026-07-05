@@ -1,0 +1,69 @@
+<!doctype html><html lang="uk"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Visimics Autopilot — Дашборд</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<!--DATA_INJECT-->
+<style>
+:root{--bg:#0f1420;--card:#1a2233;--mut:#8a97b0;--txt:#e7ecf5;--acc:#5b8def;--gd:#2a3550;--ok:#39b57a;--warn:#e0a13c}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#e7ecf5;font:14px/1.5 Arial,Helvetica,sans-serif}
+.wrap{max-width:1200px;margin:0 auto;padding:20px}
+h1{font-size:20px;margin:0 0 2px}.sub{color:#8a97b0;font-size:12px;margin-bottom:18px}
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px}
+.kpi{background:#1a2233;border:1px solid #2a3550;border-radius:12px;padding:14px}
+.kpi .v{font-size:24px;font-weight:700}.kpi .l{color:#8a97b0;font-size:12px}
+.charts{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px}
+.card{background:#1a2233;border:1px solid #2a3550;border-radius:12px;padding:14px}
+.card h3{margin:0 0 10px;font-size:13px;color:#c3ccdc;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{padding:7px 8px;border-bottom:1px solid #232d44;text-align:left}
+th{color:#8a97b0;cursor:pointer;user-select:none;position:sticky;top:0;background:#1a2233}
+td.num,th.num{text-align:right}.tag{padding:1px 7px;border-radius:10px;font-size:11px}
+.in{background:#153b2c;color:#4ad395}.ord{background:#3b3115;color:#e0a13c}
+input{background:#0f1420;border:1px solid #2a3550;color:#e7ecf5;padding:8px 10px;border-radius:8px;width:260px}
+.tblwrap{max-height:460px;overflow:auto}
+</style></head><body><div class="wrap">
+<h1>Visimics Autopilot — панель каталогу</h1><div class="sub" id="gen"></div>
+<div class="kpis" id="kpis"></div>
+<div class="charts">
+ <div class="card"><h3>Товари по категоріях</h3><canvas id="cCat"></canvas></div>
+ <div class="card"><h3>Наявність</h3><canvas id="cAv"></canvas></div>
+ <div class="card"><h3>Розподіл націнки</h3><canvas id="cMk"></canvas></div>
+</div>
+<div class="card"><h3>Товари (топ за ціною) — пошук</h3>
+ <input id="q" placeholder="Пошук по артикулу / назві / категорії…" oninput="flt()">
+ <div class="tblwrap"><table id="tbl"><thead><tr>
+   <th onclick="srt('a')">Артикул</th><th onclick="srt('n')">Назва</th><th onclick="srt('c')">Категорія</th>
+   <th class="num" onclick="srt('cost')">Закупівля</th><th class="num" onclick="srt('p')">Ціна</th>
+   <th class="num" onclick="srt('mk')">Націнка</th><th onclick="srt('av')">Наявність</th></tr></thead><tbody id="tb"></tbody></table></div>
+</div></div>
+<script>
+let DATA,ROWS,sortKey='p',sortDir=-1;
+const PAL=['#5b8def','#39b57a','#e0a13c','#c86bd6','#e05c5c','#46b5c8','#9aa7bd'];
+async function load(){DATA=window.DASHBOARD_DATA||await fetch('dashboard_data.json').then(r=>r.json());render()}
+function kpi(l,v){return `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div></div>`}
+function render(){
+ document.getElementById('gen').textContent='Оновлено: '+DATA.generated;
+ const k=DATA.kpi;
+ document.getElementById('kpis').innerHTML=
+  kpi('Товарів у фіді',k.total.toLocaleString('uk'))+kpi('В наявності',k.instock.toLocaleString('uk'))+
+  kpi('Під замовлення',k.order.toLocaleString('uk'))+kpi('Сер. націнка','×'+k.avg_markup)+kpi('Категорій',k.categories);
+ doughnut('cCat',DATA.by_category.map(x=>x.cat),DATA.by_category.map(x=>x.count));
+ doughnut('cAv',DATA.availability.map(x=>x.k),DATA.availability.map(x=>x.v),['#39b57a','#e0a13c']);
+ bar('cMk',DATA.markup_bands.map(x=>x.k),DATA.markup_bands.map(x=>x.v));
+ ROWS=DATA.items.slice();draw()
+}
+function doughnut(id,labels,data,cols){new Chart(document.getElementById(id),{type:'doughnut',
+ data:{labels,datasets:[{data,backgroundColor:cols||PAL,borderColor:'#1a2233',borderWidth:2}]},
+ options:{plugins:{legend:{position:'bottom',labels:{color:'#c3ccdc',font:{size:11},boxWidth:12}}}}})}
+function bar(id,labels,data){new Chart(document.getElementById(id),{type:'bar',
+ data:{labels,datasets:[{data,backgroundColor:'#5b8def'}]},
+ options:{plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#8a97b0',font:{size:10}},grid:{display:false}},y:{ticks:{color:'#8a97b0'},grid:{color:'#232d44'}}}}})}
+function draw(){document.getElementById('tb').innerHTML=ROWS.map(r=>`<tr>
+ <td>${r.a}</td><td>${r.n}</td><td>${r.c}</td><td class="num">${r.cost.toLocaleString('uk')}</td>
+ <td class="num">${r.p.toLocaleString('uk')}</td><td class="num">×${r.mk}</td>
+ <td><span class="tag ${r.av}">${r.av==='in'?'в наявності':'під замовл.'}</span></td></tr>`).join('')}
+function flt(){const q=document.getElementById('q').value.toLowerCase();
+ ROWS=DATA.items.filter(r=>(r.a+' '+r.n+' '+r.c).toLowerCase().includes(q));sortNow();draw()}
+function srt(k){sortDir=(sortKey===k)?-sortDir:1;sortKey=k;sortNow();draw()}
+function sortNow(){ROWS.sort((a,b)=>{let x=a[sortKey],y=b[sortKey];return (x>y?1:x<y?-1:0)*sortDir})}
+load();
+</script></body></html>
