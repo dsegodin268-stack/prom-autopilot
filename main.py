@@ -40,22 +40,34 @@ def keep_best(best, art, item):
     if k not in best or item["cost"]<best[k]["cost"]:
         item["article"]=k; best[k]=item
 
+def _norm(x): return "".join(str(x).lower().split())
+
 def gclient():
     key=os.environ.get("GCP_SA_KEY")
     if not key: return None
     import gspread
     return gspread.service_account_from_dict(json.loads(key)) if key.strip().startswith("{") else None
 
-def read_sheet_tab(gc, sid, tab, brand, presence, best):
+def read_all_tabs(gc, sid, brand, best, force=None):
     try:
-        ws=gc.open_by_key(sid).worksheet(tab); n=0
-        for r in ws.get_all_values():
+        ss=gc.open_by_key(sid)
+    except Exception as e:
+        print(f"[sheet] {brand}: OPEN FAIL {str(e)[:80] or 'нема доступу (розшар на сервіс-акаунт)'}"); return
+    for ws in ss.worksheets():
+        title=ws.title; nt=_norm(title)
+        if force: presence=force
+        elif "наяв" in nt: presence="available"
+        elif any(k in nt for k in ["чека","2-3","2–3","23дн","замов","15дн","15днів","підзам"]): presence="order"
+        else: presence="available"
+        try: rows=ws.get_all_values()
+        except Exception as e: print(f"[sheet] {brand}/{title}: READ FAIL {str(e)[:60]}"); continue
+        n=0
+        for r in rows:
             if len(r)<4: continue
             art=(r[0] or "").strip(); cost=num(r[3])
             if not art or cost<=0: continue
             keep_best(best, art, {"name":r[1],"cost":cost,"qty":num(r[2]),"presence":presence,"brand":brand}); n+=1
-        print(f"[sheet] {brand}/{tab}: {n} поз.")
-    except Exception as e: print(f"[sheet] {brand}/{tab}: {str(e)[:90]}")
+        print(f"[sheet] {brand}/{title}: {n} поз. ({presence})")
 
 def pull_autonova(best):
     user=os.environ.get("MAIL_USER"); pw=os.environ.get("MAIL_PASS")
@@ -120,11 +132,8 @@ def push_prom(payload):
 def main():
     gc=gclient(); best={}
     if gc:
-        read_sheet_tab(gc,ID_BMW,"наяв","BMW","available",best)
-        read_sheet_tab(gc,ID_BMW,"чекати 2-3д","BMW","order",best)
-        read_sheet_tab(gc,ID_BMW,"Під замовлення 15 днів","BMW","order",best)
-        read_sheet_tab(gc,ID_PORSCHE,"склад","Porsche","available",best)
-        read_sheet_tab(gc,ID_PORSCHE,"аксесуари","Porsche","available",best)
+        read_all_tabs(gc,ID_BMW,"BMW",best)                 # вкладки за назвою (наяв/чекати/15днів)
+        read_all_tabs(gc,ID_PORSCHE,"Porsche",best,force="available")  # усі вкладки = в наявності
     else:
         print("[gsheet] нема GCP_SA_KEY — таблиці постачальників пропущені")
     pull_autonova(best)
