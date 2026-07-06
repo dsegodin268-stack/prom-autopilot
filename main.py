@@ -93,6 +93,22 @@ def pull_autonova(best, instock):
         M.logout()
     except Exception as e: print(f"[autonova] {str(e)[:120]}")
 
+def _open_xlsx_tolerant(data):
+    """Відкриває xlsx; якщо 1С-файл без xl/sharedStrings.xml — додає порожній і пробує ще раз."""
+    import openpyxl, zipfile
+    try:
+        return openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except Exception:
+        zin=zipfile.ZipFile(io.BytesIO(data)); buf=io.BytesIO()
+        zout=zipfile.ZipFile(buf,"w",zipfile.ZIP_DEFLATED)
+        for it in zin.namelist(): zout.writestr(it, zin.read(it))
+        if "xl/sharedStrings.xml" not in zin.namelist():
+            zout.writestr("xl/sharedStrings.xml",
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="0" uniqueCount="0"/>')
+        zout.close(); zin.close()
+        return openpyxl.load_workbook(io.BytesIO(buf.getvalue()), read_only=True, data_only=True)
+
 def pull_autonova_drive(folder_id, best, instock):
     """Читає найсвіжіший прайс Autonova з Drive-теки (її наповнює Apps Script)
     через сервіс-акаунт. Без IMAP/пароля. Підтримує zip-архів і xlsx."""
@@ -123,7 +139,7 @@ def pull_autonova_drive(folder_id, best, instock):
             data=zf.read(inner[0])
         elif fn.endswith(".rar"):
             print("[autonova] .rar не підтримується — треба zip"); return
-        wb=openpyxl.load_workbook(io.BytesIO(data),read_only=True,data_only=True)
+        wb=_open_xlsx_tolerant(data)
         sh=wb["TDSheet"] if "TDSheet" in wb.sheetnames else wb[wb.sheetnames[0]]; n=0
         for r in sh.iter_rows(values_only=True):
             if not r or len(r)<=24 or r[2] is None: continue
