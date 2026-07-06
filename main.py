@@ -145,8 +145,13 @@ def main():
         payload.append({"id":art,"price":float(price),"presence":presence_val(it["presence"],it["qty"]),
                         "quantity_in_stock":int(it["qty"]) if it["qty"] else 0,"status":"on_display"})
     print(f"[main] позицій до пушу: {len(payload)}")
+    only=os.environ.get("LIVE_ONLY")
     lim=os.environ.get("LIVE_LIMIT")
-    if lim:
+    if only:
+        keep=set(a.strip().upper() for a in only.split(",") if a.strip())
+        payload=[p for p in payload if p["id"] in keep]
+        print(f"[main] LIVE_ONLY — КАНАРКА: тільки {len(payload)} товарів зі списку {sorted(keep)}")
+    elif lim:
         try:
             payload=payload[:int(lim)]
             print(f"[main] LIVE_LIMIT={lim} — КАНАРКА: обмежено до {len(payload)} товарів")
