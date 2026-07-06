@@ -96,6 +96,9 @@ def pull_autonova(best, instock):
 def pull_autonova_drive(folder_id, best, instock):
     """Читає найсвіжіший прайс Autonova з Drive-теки (її наповнює Apps Script)
     через сервіс-акаунт. Без IMAP/пароля. Підтримує zip-архів і xlsx."""
+    folder_id=(folder_id or "").strip()
+    if "/folders/" in folder_id:                  # приймаємо і повний URL теки, не лише ID
+        folder_id=folder_id.split("/folders/")[1].split("?")[0].split("#")[0].split("/")[0]
     key=os.environ.get("GCP_SA_KEY")
     if not key: print("[autonova] нема GCP_SA_KEY — пропуск Drive"); return
     try:
