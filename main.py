@@ -109,27 +109,47 @@ def presence_val(av, qty):
     if "замов" in a or av=="order": return "order"
     return "available" if num(qty)>0 else "order"
 
+def _prom_get(token, url):
+    req=urllib.request.Request(url, headers={"Authorization":"Bearer "+token})
+    with urllib.request.urlopen(req, timeout=60) as r: return json.loads(r.read().decode())
+
+def prom_group_ids(token):
+    """Усі id груп товарів на Prom (+ None = базовий список без групи)."""
+    ids=[None]; last=None
+    for _ in range(300):
+        url=API_BASE+"/groups/list?limit=100"+(f"&last_id={last}" if last else "")
+        try: data=_prom_get(token,url)
+        except Exception as e: print("[prom-groups]", str(e)[:100]); break
+        gs=data.get("groups", data) if isinstance(data,dict) else data
+        if not gs: break
+        for grp in gs:
+            gid=grp.get("id")
+            if gid is not None: ids.append(gid); last=gid
+        if len(gs)<100: break
+        time.sleep(0.15)
+    return ids
+
 def prom_id_map(token):
-    """Мапа артикул(sku АБО external_id, UPPER) -> внутрішній id товару Prom."""
-    m={}; last=None
-    for _ in range(1000):
-        url=API_BASE+"/products/list?limit=100"+(f"&last_id={last}" if last else "")
-        req=urllib.request.Request(url, headers={"Authorization":"Bearer "+token})
-        try:
-            with urllib.request.urlopen(req,timeout=60) as r: data=json.loads(r.read().decode())
-        except urllib.error.HTTPError as e: print("[prom-list] HTTP", e.code, e.read().decode()[:200]); break
-        except Exception as e: print("[prom-list] ERR", str(e)[:150]); break
-        prods=data.get("products", data) if isinstance(data,dict) else data
-        if not prods: break
-        for p in prods:
-            pid=p.get("id")
-            if pid is None: continue
-            for key in (p.get("sku"), p.get("external_id")):
-                k=str(key or "").strip().upper()
-                if k: m[k]=pid
-            last=pid
-        if len(prods)<100: break
-        time.sleep(0.25)
+    """Мапа артикул(sku|external_id, UPPER) -> внутрішній id. Обхід усіх груп."""
+    m={}; gids=prom_group_ids(token); print(f"[prom] груп знайдено: {len(gids)-1}")
+    for gid in gids:
+        last=None
+        for _ in range(600):
+            url=API_BASE+"/products/list?limit=100"+(f"&group_id={gid}" if gid is not None else "")+(f"&last_id={last}" if last else "")
+            try: data=_prom_get(token,url)
+            except urllib.error.HTTPError as e: print("[prom-list] HTTP",e.code,e.read().decode()[:120]); break
+            except Exception as e: print("[prom-list]", str(e)[:100]); break
+            prods=data.get("products", data) if isinstance(data,dict) else data
+            if not prods: break
+            for p in prods:
+                pid=p.get("id")
+                if pid is None: continue
+                for key in (p.get("sku"), p.get("external_id")):
+                    k=str(key or "").strip().upper()
+                    if k: m[k]=pid
+                last=pid
+            if len(prods)<100: break
+            time.sleep(0.1)
     return m
 
 def push_prom(payload):
