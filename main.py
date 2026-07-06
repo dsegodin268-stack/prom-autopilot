@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""VISIMICS AUTOPILOT — репрайсер каталогу Prom (єдиний самодостатній файл).
+"""VISIMICS AUTOPILOT — репрайсер каталогу Prom (єдиний файл).
 Джерела: BMW+Porsche (Google Sheets) + AutoNova (пошта). Ціна = тарифна націнка.
-Пуш у Prom API ТІЛЬКИ по товарах, що реально є на Prom (фільтр on-Prom).
+Матч із Prom по артикулу (поле sku), пуш по ВНУТРІШНЬОМУ id через /products/edit.
 DRY-RUN за замовчуванням (LIVE!=1)."""
 import os, json, time, io, math, imaplib, email, datetime, urllib.request, urllib.error
 
@@ -11,7 +11,7 @@ ID_PORSCHE="1oVSVg1cBxGj-DA66c5_FoAtp6zOthdnF_xTY_ugez2g"
 ID_HUB="1pesHiOHDq2Y4FYQECakfhIJlq08bg5_Pkm9e2YEDoic"
 AUTONOVA_FROM="1c@autonovad.ua"
 API_BASE="https://my.prom.ua/api/v1"
-PROM_API=API_BASE+"/products/edit_by_external_id"
+PROM_EDIT=API_BASE+"/products/edit"          # редагування по ВНУТРІШНЬОМУ id
 MARGIN_FLOOR=1.16
 LIVE=os.environ.get("LIVE")=="1"
 
@@ -56,9 +56,9 @@ def read_all_tabs(gc, sid, brand, best, force=None):
             if len(r)<3: continue
             art=(r[0] or "").strip()
             if not art: continue
-            cost=num(r[3]) if len(r)>=4 else 0     # "наяв": ціна кол.D, к-сть кол.C
+            cost=num(r[3]) if len(r)>=4 else 0
             if cost>0: qty=num(r[2])
-            else: cost=num(r[2]); qty=0             # "під замовлення": ціна кол.C
+            else: cost=num(r[2]); qty=0
             if cost<=0: continue
             keep_best(best, art, {"name":r[1],"cost":cost,"qty":qty,"presence":presence,"brand":brand}); n+=1
         print(f"[sheet] {brand}/{title}: {n} поз. ({presence})")
@@ -71,7 +71,7 @@ def pull_autonova(best):
         M=imaplib.IMAP4_SSL("imap.gmail.com"); M.login(user,pw); M.select("INBOX")
         since=(datetime.date.today()-datetime.timedelta(days=14)).strftime("%d-%b-%Y")
         _,data=M.search(None, f'(FROM "{AUTONOVA_FROM}" SINCE {since})'); ids=data[0].split()
-        if not ids: print("[autonova] листів від відправника нема за 14 днів"); M.logout(); return
+        if not ids: print("[autonova] листів нема за 14 днів"); M.logout(); return
         for numid in reversed(ids):
             _,d=M.fetch(numid,"(RFC822)"); msg=email.message_from_bytes(d[0][1]); done=False
             for part in msg.walk():
@@ -107,28 +107,28 @@ def presence_val(av, qty):
     if "замов" in a or av=="order": return "order"
     return "available" if num(qty)>0 else "order"
 
-def prom_external_ids(token):
-    """Список товарів з Prom → set external_id (=артикул). Пагінація limit+last_id."""
-    ids=set(); last=None
-    for _ in range(800):
+def prom_id_map(token):
+    """Мапа артикул(sku АБО external_id, UPPER) -> внутрішній id товару Prom."""
+    m={}; last=None
+    for _ in range(1000):
         url=API_BASE+"/products/list?limit=100"+(f"&last_id={last}" if last else "")
         req=urllib.request.Request(url, headers={"Authorization":"Bearer "+token})
         try:
-            with urllib.request.urlopen(req,timeout=60) as r:
-                raw=r.read().decode()
-                if not ids and last is None: print("[prom-list] DEBUG raw[:400]:", raw[:400])
-                data=json.loads(raw)
+            with urllib.request.urlopen(req,timeout=60) as r: data=json.loads(r.read().decode())
         except urllib.error.HTTPError as e: print("[prom-list] HTTP", e.code, e.read().decode()[:200]); break
         except Exception as e: print("[prom-list] ERR", str(e)[:150]); break
         prods=data.get("products", data) if isinstance(data,dict) else data
         if not prods: break
         for p in prods:
-            ext=str(p.get("external_id") or "").strip().upper()
-            if ext: ids.add(ext)
-            last=p.get("id", last)
+            pid=p.get("id")
+            if pid is None: continue
+            for key in (p.get("sku"), p.get("external_id")):
+                k=str(key or "").strip().upper()
+                if k: m[k]=pid
+            last=pid
         if len(prods)<100: break
-        time.sleep(0.3)
-    return ids
+        time.sleep(0.25)
+    return m
 
 def push_prom(payload):
     token=os.environ.get("PROM_API_KEY")
@@ -138,7 +138,7 @@ def push_prom(payload):
     ok=err=0
     for i in range(0,len(payload),100):
         chunk=payload[i:i+100]
-        req=urllib.request.Request(PROM_API,data=json.dumps(chunk).encode(),
+        req=urllib.request.Request(PROM_EDIT,data=json.dumps(chunk).encode(),
             headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"},method="POST")
         try:
             with urllib.request.urlopen(req,timeout=60) as rr: json.loads(rr.read().decode()); ok+=len(chunk)
@@ -156,28 +156,35 @@ def main():
     pull_autonova(best)
     overrides=load_map(gc,"overrides") if gc else {}
     comps=load_map(gc,"competitors") if gc else {}
-    payload=[]
+    items=[]
     for art,it in best.items():
         price=overrides.get(art) or price_with_competitor(it["cost"],comps.get(art))
-        payload.append({"id":art,"price":float(price),"presence":presence_val(it["presence"],it["qty"]),
-                        "quantity_in_stock":int(it["qty"]) if it["qty"] else 0,"status":"on_display"})
-    print(f"[main] прораховано: {len(payload)} товарів")
+        items.append({"article":art,"price":float(price),"presence":presence_val(it["presence"],it["qty"]),
+                      "qty":int(it["qty"]) if it["qty"] else 0})
+    print(f"[main] прораховано: {len(items)} товарів")
     token=os.environ.get("PROM_API_KEY")
     only=os.environ.get("LIVE_ONLY"); lim=os.environ.get("LIVE_LIMIT")
     if only:
         keep=set(a.strip().upper() for a in only.split(",") if a.strip())
-        payload=[p for p in payload if p["id"] in keep]
-        print(f"[main] LIVE_ONLY — КАНАРКА: {len(payload)} товарів зі списку {sorted(keep)}")
+        items=[p for p in items if p["article"] in keep]
+        print(f"[main] LIVE_ONLY канарка: {len(items)} артикулів")
+    payload=[]
+    if token and os.environ.get("SKIP_PROM_FILTER")!="1":
+        idmap=prom_id_map(token)
+        if idmap:
+            for it in items:
+                pid=idmap.get(it["article"])
+                if pid is not None:
+                    payload.append({"id":int(pid),"price":it["price"],"presence":it["presence"],
+                                    "quantity_in_stock":it["qty"],"status":"on_display"})
+            print(f"[main] on-Prom: {len(idmap)} товарів на Prom -> збіглось {len(payload)} (з {len(items)})")
+        else:
+            print("[main] on-Prom мапа порожня/недоступна — пуш скасовано (безпека)")
     else:
-        if token and os.environ.get("SKIP_PROM_FILTER")!="1":
-            on_prom=prom_external_ids(token)
-            if on_prom:
-                b=len(payload); payload=[p for p in payload if p["id"] in on_prom]
-                print(f"[main] on-Prom фільтр: на Prom {len(on_prom)} товарів -> пушимо {len(payload)} (було {b})")
-            else: print("[main] on-Prom список порожній/недоступний — фільтр пропущено")
-        if lim:
-            try: payload=payload[:int(lim)]; print(f"[main] LIVE_LIMIT={lim}: {len(payload)}")
-            except: pass
+        print("[main] нема токена / SKIP — без мапи id пуш неможливий")
+    if lim:
+        try: payload=payload[:int(lim)]; print(f"[main] LIVE_LIMIT: {len(payload)}")
+        except: pass
     print(f"[main] до пушу: {len(payload)}")
     push_prom(payload)
 
