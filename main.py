@@ -1,47 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """VISIMICS AUTOPILOT — репрайсер каталогу Prom (єдиний самодостатній файл).
-Джерела: BMW+Porsche (Google Sheets, service account) + AutoNova (пошта).
-Ціна = тарифна націнка; ручні правки й конкуренти з хаб-листа; пуш у Prom API.
-DRY-RUN за замовчуванням (LIVE!=1 => нічого не змінює, лише лог).
-
-Секрети (GitHub Secrets/Variables):
-  GCP_SA_KEY, MAIL_USER, MAIL_PASS, PROM_API_KEY, і змінна LIVE=1 для бойового пушу.
-"""
+Джерела: BMW+Porsche (Google Sheets) + AutoNova (пошта). Ціна = тарифна націнка.
+Пуш у Prom API ТІЛЬКИ по товарах, що реально є на Prom (фільтр on-Prom).
+DRY-RUN за замовчуванням (LIVE!=1)."""
 import os, json, time, io, math, imaplib, email, datetime, urllib.request, urllib.error
 
 ID_BMW="1KXaDLqBsOAtX0MxUoX39jpia9boISxl1xUxPihhU77I"
 ID_PORSCHE="1oVSVg1cBxGj-DA66c5_FoAtp6zOthdnF_xTY_ugez2g"
 ID_HUB="1pesHiOHDq2Y4FYQECakfhIJlq08bg5_Pkm9e2YEDoic"
 AUTONOVA_FROM="1c@autonovad.ua"
-PROM_API="https://my.prom.ua/api/v1/products/edit_by_external_id"
+API_BASE="https://my.prom.ua/api/v1"
+PROM_API=API_BASE+"/products/edit_by_external_id"
 MARGIN_FLOOR=1.16
 LIVE=os.environ.get("LIVE")=="1"
 
 def num(x):
     try: return float(str(x).replace(",",".").replace("\xa0","").replace(" ",""))
     except: return 0.0
-
 def final_price(cost):
     c=num(cost)
     if c<=0: return 0
     k=1.5 if c<3000 else 1.45 if c<5000 else 1.3 if c<10000 else 1.2 if c<30000 else 1.1
     return int(math.ceil(c*k))
-
 def price_with_competitor(cost, comp):
     base=final_price(cost)
     if not comp or comp<=0: return base
     floor=int(math.ceil(num(cost)*MARGIN_FLOOR)); target=int(comp)-1
     return target if (target>=floor and target<base) else base
-
 def keep_best(best, art, item):
     k=str(art).strip().upper()
     if not k: return
     if k not in best or item["cost"]<best[k]["cost"]:
         item["article"]=k; best[k]=item
-
 def _norm(x): return "".join(str(x).lower().split())
-
 def gclient():
     key=os.environ.get("GCP_SA_KEY")
     if not key: return None
@@ -49,10 +41,8 @@ def gclient():
     return gspread.service_account_from_dict(json.loads(key)) if key.strip().startswith("{") else None
 
 def read_all_tabs(gc, sid, brand, best, force=None):
-    try:
-        ss=gc.open_by_key(sid)
-    except Exception as e:
-        print(f"[sheet] {brand}: OPEN FAIL {str(e)[:80] or 'нема доступу (розшар на сервіс-акаунт)'}"); return
+    try: ss=gc.open_by_key(sid)
+    except Exception as e: print(f"[sheet] {brand}: OPEN FAIL {str(e)[:80] or 'нема доступу'}"); return
     for ws in ss.worksheets():
         title=ws.title; nt=_norm(title)
         if force: presence=force
@@ -66,11 +56,9 @@ def read_all_tabs(gc, sid, brand, best, force=None):
             if len(r)<3: continue
             art=(r[0] or "").strip()
             if not art: continue
-            cost=num(r[3]) if len(r)>=4 else 0        # формат "наяв": ціна в кол.D, кількість у кол.C
-            if cost>0:
-                qty=num(r[2])
-            else:                                      # формат "під замовлення": ціна в кол.C, кількості нема
-                cost=num(r[2]); qty=0
+            cost=num(r[3]) if len(r)>=4 else 0     # "наяв": ціна кол.D, к-сть кол.C
+            if cost>0: qty=num(r[2])
+            else: cost=num(r[2]); qty=0             # "під замовлення": ціна кол.C
             if cost<=0: continue
             keep_best(best, art, {"name":r[1],"cost":cost,"qty":qty,"presence":presence,"brand":brand}); n+=1
         print(f"[sheet] {brand}/{title}: {n} поз. ({presence})")
@@ -82,8 +70,9 @@ def pull_autonova(best):
         import openpyxl
         M=imaplib.IMAP4_SSL("imap.gmail.com"); M.login(user,pw); M.select("INBOX")
         since=(datetime.date.today()-datetime.timedelta(days=14)).strftime("%d-%b-%Y")
-        _,data=M.search(None, f'(FROM "{AUTONOVA_FROM}" SINCE {since})')
-        for numid in reversed(data[0].split()):
+        _,data=M.search(None, f'(FROM "{AUTONOVA_FROM}" SINCE {since})'); ids=data[0].split()
+        if not ids: print("[autonova] листів від відправника нема за 14 днів"); M.logout(); return
+        for numid in reversed(ids):
             _,d=M.fetch(numid,"(RFC822)"); msg=email.message_from_bytes(d[0][1]); done=False
             for part in msg.walk():
                 fn=part.get_filename() or ""
@@ -100,7 +89,7 @@ def pull_autonova(best):
                     wb.close(); done=True; print(f"[autonova] {n} поз.")
             if done: break
         M.logout()
-    except Exception as e: print(f"[autonova] {str(e)[:100]}")
+    except Exception as e: print(f"[autonova] {str(e)[:120]}")
 
 def load_map(gc, tab):
     m={}
@@ -117,6 +106,25 @@ def presence_val(av, qty):
     if "наяв" in a or av=="available": return "available"
     if "замов" in a or av=="order": return "order"
     return "available" if num(qty)>0 else "order"
+
+def prom_external_ids(token):
+    """Список товарів з Prom → set external_id (=артикул). Пагінація limit+last_id."""
+    ids=set(); last=None
+    for _ in range(800):
+        url=API_BASE+"/products/list?limit=100"+(f"&last_id={last}" if last else "")
+        req=urllib.request.Request(url, headers={"Authorization":"Bearer "+token})
+        try:
+            with urllib.request.urlopen(req,timeout=60) as r: data=json.loads(r.read().decode())
+        except Exception as e: print("[prom-list]", str(e)[:120]); break
+        prods=data.get("products", data) if isinstance(data,dict) else data
+        if not prods: break
+        for p in prods:
+            ext=str(p.get("external_id") or "").strip().upper()
+            if ext: ids.add(ext)
+            last=p.get("id", last)
+        if len(prods)<100: break
+        time.sleep(0.3)
+    return ids
 
 def push_prom(payload):
     token=os.environ.get("PROM_API_KEY")
@@ -138,10 +146,9 @@ def push_prom(payload):
 def main():
     gc=gclient(); best={}
     if gc:
-        read_all_tabs(gc,ID_BMW,"BMW",best)                 # вкладки за назвою (наяв/чекати/15днів)
-        read_all_tabs(gc,ID_PORSCHE,"Porsche",best,force="available")  # усі вкладки = в наявності
-    else:
-        print("[gsheet] нема GCP_SA_KEY — таблиці постачальників пропущені")
+        read_all_tabs(gc,ID_BMW,"BMW",best)
+        read_all_tabs(gc,ID_PORSCHE,"Porsche",best,force="available")
+    else: print("[gsheet] нема GCP_SA_KEY — таблиці пропущені")
     pull_autonova(best)
     overrides=load_map(gc,"overrides") if gc else {}
     comps=load_map(gc,"competitors") if gc else {}
@@ -150,18 +157,24 @@ def main():
         price=overrides.get(art) or price_with_competitor(it["cost"],comps.get(art))
         payload.append({"id":art,"price":float(price),"presence":presence_val(it["presence"],it["qty"]),
                         "quantity_in_stock":int(it["qty"]) if it["qty"] else 0,"status":"on_display"})
-    print(f"[main] позицій до пушу: {len(payload)}")
-    only=os.environ.get("LIVE_ONLY")
-    lim=os.environ.get("LIVE_LIMIT")
+    print(f"[main] прораховано: {len(payload)} товарів")
+    token=os.environ.get("PROM_API_KEY")
+    only=os.environ.get("LIVE_ONLY"); lim=os.environ.get("LIVE_LIMIT")
     if only:
         keep=set(a.strip().upper() for a in only.split(",") if a.strip())
         payload=[p for p in payload if p["id"] in keep]
-        print(f"[main] LIVE_ONLY — КАНАРКА: тільки {len(payload)} товарів зі списку {sorted(keep)}")
-    elif lim:
-        try:
-            payload=payload[:int(lim)]
-            print(f"[main] LIVE_LIMIT={lim} — КАНАРКА: обмежено до {len(payload)} товарів")
-        except: pass
+        print(f"[main] LIVE_ONLY — КАНАРКА: {len(payload)} товарів зі списку {sorted(keep)}")
+    else:
+        if token and os.environ.get("SKIP_PROM_FILTER")!="1":
+            on_prom=prom_external_ids(token)
+            if on_prom:
+                b=len(payload); payload=[p for p in payload if p["id"] in on_prom]
+                print(f"[main] on-Prom фільтр: на Prom {len(on_prom)} товарів -> пушимо {len(payload)} (було {b})")
+            else: print("[main] on-Prom список порожній/недоступний — фільтр пропущено")
+        if lim:
+            try: payload=payload[:int(lim)]; print(f"[main] LIVE_LIMIT={lim}: {len(payload)}")
+            except: pass
+    print(f"[main] до пушу: {len(payload)}")
     push_prom(payload)
 
 if __name__=="__main__": main()
