@@ -63,10 +63,16 @@ def read_all_tabs(gc, sid, brand, best, force=None):
         except Exception as e: print(f"[sheet] {brand}/{title}: READ FAIL {str(e)[:60]}"); continue
         n=0
         for r in rows:
-            if len(r)<4: continue
-            art=(r[0] or "").strip(); cost=num(r[3])
-            if not art or cost<=0: continue
-            keep_best(best, art, {"name":r[1],"cost":cost,"qty":num(r[2]),"presence":presence,"brand":brand}); n+=1
+            if len(r)<3: continue
+            art=(r[0] or "").strip()
+            if not art: continue
+            cost=num(r[3]) if len(r)>=4 else 0        # формат "наяв": ціна в кол.D, кількість у кол.C
+            if cost>0:
+                qty=num(r[2])
+            else:                                      # формат "під замовлення": ціна в кол.C, кількості нема
+                cost=num(r[2]); qty=0
+            if cost<=0: continue
+            keep_best(best, art, {"name":r[1],"cost":cost,"qty":qty,"presence":presence,"brand":brand}); n+=1
         print(f"[sheet] {brand}/{title}: {n} поз. ({presence})")
 
 def pull_autonova(best):
