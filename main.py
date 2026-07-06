@@ -139,17 +139,20 @@ def pull_autonova_drive(folder_id, best, instock):
             data=zf.read(inner[0])
         elif fn.endswith(".rar"):
             print("[autonova] .rar не підтримується — треба zip"); return
-        wb=_open_xlsx_tolerant(data)
-        sh=wb["TDSheet"] if "TDSheet" in wb.sheetnames else wb[wb.sheetnames[0]]; n=0
-        for r in sh.iter_rows(values_only=True):
-            if not r or len(r)<=24 or r[2] is None: continue
+        from python_calamine import CalamineWorkbook
+        cw=CalamineWorkbook.from_filelike(io.BytesIO(data))
+        names=cw.sheet_names
+        sh=cw.get_sheet_by_name("TDSheet") if "TDSheet" in names else cw.get_sheet_by_index(0)
+        rows=sh.to_python(skip_empty_area=False); n=0
+        for r in rows:
+            if len(r)<=24 or r[2] in (None,""): continue
             cost=num(r[24])
             if cost<=0: continue
             qty=sum(num(r[c]) for c in range(5,23) if c<len(r))
             if qty<=0: continue
             keep_best(best,r[2],{"name":str(r[1] or ""),"cost":cost,"qty":qty,
                      "presence":"available","brand":"Авто"}, instock); n+=1
-        wb.close(); print(f"[autonova] Drive '{files[0]['name']}': {n} поз.")
+        print(f"[autonova] Drive '{files[0]['name']}': {n} поз.")
     except Exception as e:
         print(f"[autonova] Drive {str(e)[:140]}")
 
