@@ -1,7 +1,7 @@
 name: nightly-reprice
 on:
   schedule:
-    - cron: "0 2 * * *"        # щоночі ~05:00 Київ
+    - cron: "0 2 * * *"      # щоночі ~05:00 Київ
   workflow_dispatch: {}
 jobs:
   reprice:
@@ -13,9 +13,10 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Repricer
         env:
-          GCP_SA_KEY:   ${{ secrets.GCP_SA_KEY }}
-          MAIL_USER:    ${{ secrets.MAIL_USER }}
-          MAIL_PASS:    ${{ secrets.MAIL_PASS }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          MAIL_USER: ${{ secrets.MAIL_USER }}
+          MAIL_PASS: ${{ secrets.MAIL_PASS }}
           PROM_API_KEY: ${{ secrets.PROM_API_KEY }}
-          LIVE:         ${{ vars.LIVE }}
+          AUTONOVA_FOLDER_ID: ${{ secrets.AUTONOVA_FOLDER_ID }}
+          LIVE: ${{ vars.LIVE }}
         run: python main.py
