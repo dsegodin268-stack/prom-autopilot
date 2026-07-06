@@ -19,4 +19,6 @@ jobs:
           PROM_API_KEY: ${{ secrets.PROM_API_KEY }}
           AUTONOVA_FOLDER_ID: ${{ secrets.AUTONOVA_FOLDER_ID }}
           LIVE: ${{ vars.LIVE }}
+          LIVE_ONLY: ${{ vars.LIVE_ONLY }}
+          LIVE_LIMIT: ${{ vars.LIVE_LIMIT }}
         run: python main.py
