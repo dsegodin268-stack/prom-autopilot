@@ -114,8 +114,12 @@ def prom_external_ids(token):
         url=API_BASE+"/products/list?limit=100"+(f"&last_id={last}" if last else "")
         req=urllib.request.Request(url, headers={"Authorization":"Bearer "+token})
         try:
-            with urllib.request.urlopen(req,timeout=60) as r: data=json.loads(r.read().decode())
-        except Exception as e: print("[prom-list]", str(e)[:120]); break
+            with urllib.request.urlopen(req,timeout=60) as r:
+                raw=r.read().decode()
+                if not ids and last is None: print("[prom-list] DEBUG raw[:400]:", raw[:400])
+                data=json.loads(raw)
+        except urllib.error.HTTPError as e: print("[prom-list] HTTP", e.code, e.read().decode()[:200]); break
+        except Exception as e: print("[prom-list] ERR", str(e)[:150]); break
         prods=data.get("products", data) if isinstance(data,dict) else data
         if not prods: break
         for p in prods:
