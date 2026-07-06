@@ -28,9 +28,11 @@ def price_with_competitor(cost, comp):
     if not comp or comp<=0: return base
     floor=int(math.ceil(num(cost)*MARGIN_FLOOR)); target=int(comp)-1
     return target if (target>=floor and target<base) else base
-def keep_best(best, art, item):
+def keep_best(best, art, item, instock):
     k=str(art).strip().upper()
     if not k: return
+    if item.get("presence")=="available" and num(item.get("qty"))>0:   # пріоритет "в наявності"
+        instock[k]=max(instock.get(k,0), int(num(item.get("qty"))))
     if k not in best or item["cost"]<best[k]["cost"]:
         item["article"]=k; best[k]=item
 def _norm(x): return "".join(str(x).lower().split())
@@ -40,7 +42,7 @@ def gclient():
     import gspread
     return gspread.service_account_from_dict(json.loads(key)) if key.strip().startswith("{") else None
 
-def read_all_tabs(gc, sid, brand, best, force=None):
+def read_all_tabs(gc, sid, brand, best, instock, force=None):
     try: ss=gc.open_by_key(sid)
     except Exception as e: print(f"[sheet] {brand}: OPEN FAIL {str(e)[:80] or 'нема доступу'}"); return
     for ws in ss.worksheets():
@@ -60,10 +62,10 @@ def read_all_tabs(gc, sid, brand, best, force=None):
             if cost>0: qty=num(r[2])
             else: cost=num(r[2]); qty=0
             if cost<=0: continue
-            keep_best(best, art, {"name":r[1],"cost":cost,"qty":qty,"presence":presence,"brand":brand}); n+=1
+            keep_best(best, art, {"name":r[1],"cost":cost,"qty":qty,"presence":presence,"brand":brand}, instock); n+=1
         print(f"[sheet] {brand}/{title}: {n} поз. ({presence})")
 
-def pull_autonova(best):
+def pull_autonova(best, instock):
     user=os.environ.get("MAIL_USER"); pw=os.environ.get("MAIL_PASS")
     if not user or not pw: print("[autonova] нема MAIL_USER/PASS — пропуск"); return
     try:
@@ -85,7 +87,7 @@ def pull_autonova(best):
                         if cost<=0: continue
                         qty=sum(num(r[c]) for c in range(5,23) if c<len(r))
                         if qty<=0: continue
-                        keep_best(best,r[2],{"name":str(r[1] or ""),"cost":cost,"qty":qty,"presence":"available","brand":"Авто"}); n+=1
+                        keep_best(best,r[2],{"name":str(r[1] or ""),"cost":cost,"qty":qty,"presence":"available","brand":"Авто"}, instock); n+=1
                     wb.close(); done=True; print(f"[autonova] {n} поз.")
             if done: break
         M.logout()
@@ -148,19 +150,20 @@ def push_prom(payload):
     print(f"[prom] надіслано ~{ok}, помилок-батчів {err}")
 
 def main():
-    gc=gclient(); best={}
+    gc=gclient(); best={}; instock={}
     if gc:
-        read_all_tabs(gc,ID_BMW,"BMW",best)
-        read_all_tabs(gc,ID_PORSCHE,"Porsche",best,force="available")
+        read_all_tabs(gc,ID_BMW,"BMW",best,instock)
+        read_all_tabs(gc,ID_PORSCHE,"Porsche",best,instock,force="available")
     else: print("[gsheet] нема GCP_SA_KEY — таблиці пропущені")
-    pull_autonova(best)
+    pull_autonova(best,instock)
     overrides=load_map(gc,"overrides") if gc else {}
     comps=load_map(gc,"competitors") if gc else {}
     items=[]
     for art,it in best.items():
         price=overrides.get(art) or price_with_competitor(it["cost"],comps.get(art))
-        items.append({"article":art,"price":float(price),"presence":presence_val(it["presence"],it["qty"]),
-                      "qty":int(it["qty"]) if it["qty"] else 0})
+        aq=instock.get(art,0)                      # пріоритет "в наявності"
+        items.append({"article":art,"price":float(price),
+                      "presence":"available" if aq>0 else "order","qty":aq})
     print(f"[main] прораховано: {len(items)} товарів")
     token=os.environ.get("PROM_API_KEY")
     only=os.environ.get("LIVE_ONLY"); lim=os.environ.get("LIVE_LIMIT")
