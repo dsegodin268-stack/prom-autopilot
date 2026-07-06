@@ -93,6 +93,47 @@ def pull_autonova(best, instock):
         M.logout()
     except Exception as e: print(f"[autonova] {str(e)[:120]}")
 
+def pull_autonova_drive(folder_id, best, instock):
+    """Читає найсвіжіший прайс Autonova з Drive-теки (її наповнює Apps Script)
+    через сервіс-акаунт. Без IMAP/пароля. Підтримує zip-архів і xlsx."""
+    key=os.environ.get("GCP_SA_KEY")
+    if not key: print("[autonova] нема GCP_SA_KEY — пропуск Drive"); return
+    try:
+        import openpyxl
+        from google.oauth2.service_account import Credentials
+        from googleapiclient.discovery import build
+        creds=Credentials.from_service_account_info(json.loads(key),
+              scopes=["https://www.googleapis.com/auth/drive.readonly"])
+        svc=build("drive","v3",credentials=creds,cache_discovery=False)
+        q="'%s' in parents and trashed=false and name contains 'autonova_latest'"%folder_id
+        files=svc.files().list(q=q,fields="files(id,name,modifiedTime,size)",
+              orderBy="modifiedTime desc",pageSize=5,
+              supportsAllDrives=True,includeItemsFromAllDrives=True).execute().get("files",[])
+        if not files: print("[autonova] у Drive-теці файлів нема"); return
+        fn=files[0]["name"].lower()
+        data=svc.files().get_media(fileId=files[0]["id"]).execute()
+        if fn.endswith(".zip"):                       # прайс приходить архівом → розпакувати
+            import zipfile
+            zf=zipfile.ZipFile(io.BytesIO(data))
+            inner=[m for m in zf.namelist() if m.lower().endswith((".xlsx",".xls"))]
+            if not inner: print("[autonova] у zip нема xlsx"); return
+            data=zf.read(inner[0])
+        elif fn.endswith(".rar"):
+            print("[autonova] .rar не підтримується — треба zip"); return
+        wb=openpyxl.load_workbook(io.BytesIO(data),read_only=True,data_only=True)
+        sh=wb["TDSheet"] if "TDSheet" in wb.sheetnames else wb[wb.sheetnames[0]]; n=0
+        for r in sh.iter_rows(values_only=True):
+            if not r or len(r)<=24 or r[2] is None: continue
+            cost=num(r[24])
+            if cost<=0: continue
+            qty=sum(num(r[c]) for c in range(5,23) if c<len(r))
+            if qty<=0: continue
+            keep_best(best,r[2],{"name":str(r[1] or ""),"cost":cost,"qty":qty,
+                     "presence":"available","brand":"Авто"}, instock); n+=1
+        wb.close(); print(f"[autonova] Drive '{files[0]['name']}': {n} поз.")
+    except Exception as e:
+        print(f"[autonova] Drive {str(e)[:140]}")
+
 def load_map(gc, tab):
     m={}
     try:
@@ -175,7 +216,9 @@ def main():
         read_all_tabs(gc,ID_BMW,"BMW",best,instock)
         read_all_tabs(gc,ID_PORSCHE,"Porsche",best,instock,force="available")
     else: print("[gsheet] нема GCP_SA_KEY — таблиці пропущені")
-    pull_autonova(best,instock)
+    folder=os.environ.get("AUTONOVA_FOLDER_ID")
+    if folder: pull_autonova_drive(folder,best,instock)   # шлях Drive (без пароля)
+    else: pull_autonova(best,instock)                     # запасний шлях: пошта IMAP
     overrides=load_map(gc,"overrides") if gc else {}
     comps=load_map(gc,"competitors") if gc else {}
     items=[]
