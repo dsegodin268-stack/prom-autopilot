@@ -145,6 +145,12 @@ def main():
         payload.append({"id":art,"price":float(price),"presence":presence_val(it["presence"],it["qty"]),
                         "quantity_in_stock":int(it["qty"]) if it["qty"] else 0,"status":"on_display"})
     print(f"[main] позицій до пушу: {len(payload)}")
+    lim=os.environ.get("LIVE_LIMIT")
+    if lim:
+        try:
+            payload=payload[:int(lim)]
+            print(f"[main] LIVE_LIMIT={lim} — КАНАРКА: обмежено до {len(payload)} товарів")
+        except: pass
     push_prom(payload)
 
 if __name__=="__main__": main()
