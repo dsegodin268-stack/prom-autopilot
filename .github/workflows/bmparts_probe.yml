@@ -1,0 +1,20 @@
+name: bmparts-probe
+on:
+  workflow_dispatch:
+    inputs:
+      article:
+        description: "Артикул для тесту (код товару BM Parts)"
+        required: true
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -r requirements.txt
+      - name: Probe BM Parts (1 товар → картка → валідатор)
+        env:
+          BMPARTS_TOKEN: ${{ secrets.BMPARTS_TOKEN }}
+          PROBE_ARTICLE: ${{ github.event.inputs.article }}
+        run: python bmparts.py
