@@ -8,6 +8,7 @@ import math
 import html
 import re
 import datetime
+import unicodedata
 
 ID_HUB = "1pesHiOHDq2Y4FYQECakfhIJlq08bg5_Pkm9e2YEDoic"
 PRODUCTS_TAB = os.environ.get("PRODUCTS_TAB", "Export Products Sheet")
@@ -242,6 +243,25 @@ def build_fields(product):
     return f, name_ua, imgs, details, price
 
 
+def _norm(t):
+    return unicodedata.normalize("NFC", str(t or "")).strip()
+
+
+def get_or_create(ss, title, rows, cols):
+    """Знайти вкладку за NFC-нормалізованою назвою; інакше створити. Стійко до кешу/нормалізації/гонки."""
+    want = _norm(title)
+    for w in ss.worksheets():
+        if _norm(w.title) == want:
+            return w
+    try:
+        return ss.add_worksheet(title=title, rows=rows, cols=cols)
+    except Exception:
+        for w in ss.worksheets():
+            if _norm(w.title) == want:
+                return w
+        raise
+
+
 def main():
     from bmparts import BMParts
     from validator import validate_card, summarize
@@ -277,11 +297,7 @@ def main():
         if i >= 0:
             full[i] = v
 
-    try:
-        stg = ss.worksheet(STAGING_TAB)
-    except Exception:
-        stg = ss.add_worksheet(title=STAGING_TAB, rows=200, cols=max(len(header), 26))
-        stg.update(values=[header], range_name="A1")
+    stg = get_or_create(ss, STAGING_TAB, 200, max(len(header), 26))
     if stg.row_values(1) != header:
         stg.resize(rows=max(stg.row_count, 200), cols=len(header))
         stg.update(values=[header], range_name="A1")
@@ -295,12 +311,8 @@ def main():
         print("[staging] appended")
 
     rhead = ["Артикул", "Назва", "Статус", "Дата додавання", "Підтвердити"]
-    try:
-        rv = ss.worksheet(REVIEW_TAB)
-        if rv.row_values(1) != rhead:
-            rv.update(values=[rhead], range_name="A1")
-    except Exception:
-        rv = ss.add_worksheet(title=REVIEW_TAB, rows=200, cols=6)
+    rv = get_or_create(ss, REVIEW_TAB, 200, 6)
+    if rv.row_values(1) != rhead:
         rv.update(values=[rhead], range_name="A1")
     today = datetime.date.today().isoformat()
     rv_arts = rv.col_values(1)
