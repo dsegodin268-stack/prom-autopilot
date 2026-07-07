@@ -19,7 +19,7 @@ PROM_UNITS = {
 _LETTER = re.compile(r"[A-Za-zА-Яа-яІіЇїЄєҐґ]")
 _SEO_NAME = ("купити", "продати", "оптом", "купить", "заказать", "недорого", "дешево")
 _LINK = re.compile(r"https?://|www\.|\.com|t\.me/|viber|telegram|whatsapp|instagram", re.I)
-_PHONE = re.compile(r"\+?380\d{9}|\b0\d{9}\b")
+_PHONE = re.compile(r"\+?380\d{9}|\b0\d{2}[\s\-]\d{3}[\s\-]?\d{2}[\s\-]?\d{2}\b")
 
 
 def _has_letter(s):
