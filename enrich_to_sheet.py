@@ -244,21 +244,29 @@ def build_fields(product):
 
 
 def _norm(t):
-    return unicodedata.normalize("NFC", str(t or "")).strip()
+    return unicodedata.normalize("NFC", str(t or "")).strip().casefold()
 
 
 def get_or_create(ss, title, rows, cols):
     """Знайти вкладку за NFC-нормалізованою назвою; інакше створити. Стійко до кешу/нормалізації/гонки."""
     want = _norm(title)
+
+    def _pick(w):
+        if w.title != title:
+            try:
+                w.update_title(title)
+            except Exception:
+                pass
+        return w
     for w in ss.worksheets():
         if _norm(w.title) == want:
-            return w
+            return _pick(w)
     try:
         return ss.add_worksheet(title=title, rows=rows, cols=cols)
     except Exception:
         for w in ss.worksheets():
             if _norm(w.title) == want:
-                return w
+                return _pick(w)
         raise
 
 
