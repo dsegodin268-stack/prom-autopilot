@@ -198,6 +198,18 @@ def gen_keywords(product, lang):
     for r in repl[:6]:
         add(r.split()[-1] if r else r)
     add(art)
+    # добір до 20-30: комбінації типу+авто, бренд+OEM, повна назва
+    pad = []
+    for c in cars[1:]:
+        pad.append(f"{typ_l} {c}")
+        if carbrand:
+            pad.append(f"{typ_l} {carbrand} {c}")
+    for o in oem:
+        pad.append(f"{brand} {o}")
+    pad.append(re.sub(r"[-—–]", " ", name).strip())
+    j = 0
+    while len(kws) < 22 and j < len(pad):
+        add(pad[j]); j += 1
     return kws[:30]
 
 
@@ -221,10 +233,17 @@ def meta_desc(product, lang):
 
 
 def build_fields(product):
-    from bmparts import clean_name, cdn_url, parse_details
+    from bmparts import clean_name, cdn_url, parse_details, oem_and_replacements
     art = str(product.get("article") or "").strip()
     name_ua = clean_name(product.get("name"))
     name_ru = clean_name(ua2ru(product.get("name") or ""))
+    _oem, _ = oem_and_replacements(product)
+    if _oem:
+        _o = str(_oem[0]).strip()
+        if _o and _o not in name_ua and len(name_ua) + len(_o) + 1 <= 110:
+            name_ua = f"{name_ua} {_o}"
+        if _o and _o not in name_ru and len(name_ru) + len(_o) + 1 <= 110:
+            name_ru = f"{name_ru} {_o}"
     imgs = [cdn_url(p) for p in (product.get("images") or [])]
     details = parse_details(product.get("details"))
     price = final_price(product.get("price"))
@@ -270,15 +289,40 @@ def get_or_create(ss, title, rows, cols):
         raise
 
 
+def char_columns(header):
+    """Знайти слоти характеристик Prom: трійки (назва, одиниця, значення) за назвами колонок."""
+    triples = []
+    cur = {}
+    order = []
+    for i, h in enumerate(header):
+        hl = str(h).lower()
+        if "характеристик" not in hl:
+            continue
+        if "назв" in hl:
+            k = "n"
+        elif "одиниц" in hl or "вимір" in hl:
+            k = "u"
+        elif "значенн" in hl:
+            k = "v"
+        else:
+            continue
+        cur[k] = i
+        order.append(k)
+        if all(x in cur for x in ("n", "u", "v")):
+            triples.append((cur["n"], cur["u"], cur["v"]))
+            cur = {}
+    return triples
+
+
 def main():
     from bmparts import BMParts
-    from validator import validate_card, summarize
+    from validator import validate_card, summarize, PROM_UNITS
     gc = gclient()
     ss = gc.open_by_key(ID_HUB)
     src = ss.worksheet(PRODUCTS_TAB)
     header = src.row_values(1)
     print(f"=== Export Products Sheet: {len(header)} cols ===")
-    print("head12:", header[:12])
+    print("HDR:", " | ".join(f"{i}:{h}" for i, h in enumerate(header)))
     art = os.environ.get("WRITE_ARTICLE", "").strip()
     if not art:
         print("no WRITE_ARTICLE"); return
@@ -304,6 +348,18 @@ def main():
         i = col_idx(header, k)
         if i >= 0:
             full[i] = v
+
+    triples = char_columns(header)
+    ci = 0
+    for (nm, un, vl) in details:
+        if ci >= len(triples):
+            break
+        ni, ui, vi = triples[ci]
+        full[ni] = nm
+        full[ui] = un if (un and un in PROM_UNITS) else ""
+        full[vi] = vl
+        ci += 1
+    print(f"chars: {len(triples)} slots, filled {ci} from {len(details)} details")
 
     stg = get_or_create(ss, STAGING_TAB, 200, max(len(header), 26))
     if stg.row_values(1) != header:
