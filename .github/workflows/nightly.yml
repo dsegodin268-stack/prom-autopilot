@@ -1,7 +1,7 @@
 name: nightly-reprice
 on:
   schedule:
-    - cron: "23 2 * * *"     # ~05:23 Київ (не о рівній годині — GitHub рідше дропає розклад)
+    - cron: "23 5 * * *"     # ~08:23 Київ (8 ранку зі зсувом — GitHub рідше дропає не о рівній годині)
   workflow_dispatch: {}
 jobs:
   reprice:
