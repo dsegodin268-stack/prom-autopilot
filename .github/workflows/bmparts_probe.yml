@@ -13,7 +13,15 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
       - run: pip install -r requirements.txt
-      - name: Probe BM Parts (1 товар → картка → валідатор)
+      - name: Auth check
+        env:
+          BMPARTS_TOKEN: ${{ secrets.BMPARTS_TOKEN }}
+        run: |
+          echo "token_len=${#BMPARTS_TOKEN}"
+          code=$(curl -s -o /tmp/me.json -w "%{http_code}" -H "Authorization: $BMPARTS_TOKEN" -H "User-Agent: VisimicsBot/1.0" https://api.bm.parts/profile/me)
+          echo "profile/me HTTP $code"
+          head -c 600 /tmp/me.json; echo
+      - name: Probe BM Parts
         env:
           BMPARTS_TOKEN: ${{ secrets.BMPARTS_TOKEN }}
           PROBE_ARTICLE: ${{ github.event.inputs.article }}
