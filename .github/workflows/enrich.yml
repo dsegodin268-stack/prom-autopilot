@@ -1,0 +1,21 @@
+name: enrich-to-sheet
+on:
+  workflow_dispatch:
+    inputs:
+      write_article:
+        description: "Артикул для запису опису (порожньо = лише INSPECT)"
+        required: false
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -r requirements.txt
+      - name: Enrich to sheet
+        env:
+          BMPARTS_TOKEN: ${{ secrets.BMPARTS }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          WRITE_ARTICLE: ${{ github.event.inputs.write_article }}
+        run: python enrich_to_sheet.py
