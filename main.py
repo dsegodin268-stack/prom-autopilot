@@ -192,8 +192,9 @@ def prom_group_ids(token):
         time.sleep(0.15)
     return ids
 
-def prom_id_map(token):
-    """Мапа артикул(sku|external_id, UPPER) -> внутрішній id. Обхід усіх груп."""
+def prom_id_map(token, pinfo=None):
+    """Мапа артикул(sku|external_id, UPPER) -> внутрішній id. Обхід усіх груп.
+    Якщо задано pinfo (dict) — заповнює його даними товару Prom для звіту."""
     m={}; gids=prom_group_ids(token); print(f"[prom] груп знайдено: {len(gids)-1}")
     for gid in gids:
         last=None
@@ -207,9 +208,17 @@ def prom_id_map(token):
             for p in prods:
                 pid=p.get("id")
                 if pid is None: continue
+                first=None
                 for key in (p.get("sku"), p.get("external_id")):
                     k=str(key or "").strip().upper()
-                    if k: m[k]=pid
+                    if k:
+                        m[k]=pid
+                        if first is None: first=k
+                if pinfo is not None and first:
+                    g=p.get("group")
+                    pinfo[first]={"name":p.get("name",""),"price":p.get("price"),
+                        "presence":p.get("presence"),
+                        "group":(g.get("name") if isinstance(g,dict) else (p.get("group_name") or g or ""))}
                 last=pid
             if len(prods)<100: break
             time.sleep(0.1)
@@ -232,8 +241,30 @@ def push_prom(payload):
         time.sleep(1)
     print(f"[prom] надіслано ~{ok}, помилок-батчів {err}")
 
+def write_report(gc, pinfo, best, instock, overrides, comps):
+    """Вкладка ЗВІТ у хаб-таблиці: по кожному товару Prom — поточна ціна,
+    нова ціна робота, наявність, джерело, статус (+ прапорець 'нема постачальника')."""
+    head=["Артикул","Назва (Prom)","Ціна Prom","Ціна нова","Наявність","Джерело","Собівартість","Статус"]
+    rows=[head]
+    for art,info in pinfo.items():
+        b=best.get(art)
+        if b:
+            newp=overrides.get(art) or price_with_competitor(b["cost"], comps.get(art))
+            pres="в наявності" if instock.get(art,0)>0 else "під замовлення"
+            rows.append([art, info.get("name",""), info.get("price",""), newp, pres,
+                         b.get("brand",""), b.get("cost",""), "оновлюється"])
+        else:
+            rows.append([art, info.get("name",""), info.get("price",""), "", "", "", "", "НЕМА ПОСТАЧАЛЬНИКА"])
+    ss=gc.open_by_key(ID_HUB)
+    try: ws=ss.worksheet("ЗВІТ")
+    except Exception: ws=ss.add_worksheet(title="ЗВІТ", rows=max(len(rows)+5,100), cols=len(head))
+    ws.resize(rows=max(len(rows)+5,10), cols=len(head))
+    ws.clear()
+    ws.update(values=rows, range_name="A1")
+    print(f"[report] ЗВІТ: {len(rows)-1} рядків записано")
+
 def main():
-    gc=gclient(); best={}; instock={}
+    gc=gclient(); best={}; instock={}; pinfo={}
     if gc:
         read_all_tabs(gc,ID_BMW,"BMW",best,instock)
         read_all_tabs(gc,ID_PORSCHE,"Porsche",best,instock,force="available")
@@ -258,7 +289,7 @@ def main():
         print(f"[main] LIVE_ONLY канарка: {len(items)} артикулів")
     payload=[]
     if token and os.environ.get("SKIP_PROM_FILTER")!="1":
-        idmap=prom_id_map(token)
+        idmap=prom_id_map(token, pinfo)
         if idmap:
             for it in items:
                 pid=idmap.get(it["article"])
@@ -275,5 +306,8 @@ def main():
         except: pass
     print(f"[main] до пушу: {len(payload)}")
     push_prom(payload)
+    if gc and pinfo:                                   # звіт у таблицю (панель, видимість)
+        try: write_report(gc, pinfo, best, instock, overrides, comps)
+        except Exception as e: print("[report]", str(e)[:140])
 
 if __name__=="__main__": main()
