@@ -324,6 +324,11 @@ def main():
     print(f"=== Export Products Sheet: {len(header)} cols ===")
     print("HDR:", " | ".join(f"{i}:{h}" for i, h in enumerate(header)))
     art = os.environ.get("WRITE_ARTICLE", "").strip()
+    if art.upper() == "RESET":
+        rv = get_or_create(ss, REVIEW_TAB, 200, 6)
+        rv.clear()
+        print(f"[reset] cleared review tab {REVIEW_TAB}")
+        return
     if not art:
         print("no WRITE_ARTICLE"); return
 
