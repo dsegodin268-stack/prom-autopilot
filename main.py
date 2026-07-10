@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""VISIMICS AUTOPILOT — репрайсер каталогу Prom (єдиний файл).
-Джерела: BMW+Porsche (Google Sheets) + AutoNova (пошта). Ціна = тарифна націнка.
-Матч із Prom по артикулу (поле sku), пуш по ВНУТРІШНЬОМУ id через /products/edit.
-DRY-RUN за замовчуванням (LIVE!=1)."""
-import os, json, time, io, math, imaplib, email, datetime, urllib.request, urllib.error
+"""VISIMICS AUTOPILOT — репрайсер каталогу Prom (єдиний файл, БЕЗ Prom API).
+Джерела собівартості: BMW+Porsche (Google Sheets) + AutoNova (Drive/пошта).
+Каталог і публікація — ТІЛЬКИ через вкладку «Export Products Sheet» у хабі
+(її тягне Prom за URL-фідом). Пише три поля: Ціна(8), Наявність(15), Кількість(16).
+Захист: MIN_MARKUP_ABS, MAX_DROP_PCT, ANCHOR_FLOOR (якір 30.06).
+Реальний запис у таблицю лише при LIVE=1 (інакше DRY-RUN: рахує + звіт, не пише)."""
+import os, json, io, math, imaplib, email, datetime
 
 ID_BMW="1KXaDLqBsOAtX0MxUoX39jpia9boISxl1xUxPihhU77I"
 ID_PORSCHE="1oVSVg1cBxGj-DA66c5_FoAtp6zOthdnF_xTY_ugez2g"
 ID_HUB="1pesHiOHDq2Y4FYQECakfhIJlq08bg5_Pkm9e2YEDoic"
 AUTONOVA_FROM="1c@autonovad.ua"
-API_BASE="https://my.prom.ua/api/v1"
-PROM_EDIT=API_BASE+"/products/edit"          # редагування по ВНУТРІШНЬОМУ id
+EXPORT_TAB="Export Products Sheet"        # ЄДИНЕ джерело каталогу і місце публікації (Prom тягне звідси)
+# колонки формату експорту Prom (0-based)
+C_CODE=0; C_NAME=1; C_PRICE=8; C_AVAIL=15; C_QTY=16
 MARGIN_FLOOR=1.16
-LIVE=os.environ.get("LIVE")=="1"
+LIVE=os.environ.get("LIVE")=="1"          # LIVE=1 -> реально писати в Export; інакше DRY-RUN
 
 def num(x):
     try: return float(str(x).replace(",",".").replace("\xa0","").replace(" ",""))
     except: return 0.0
 # --- Захисні параметри ціноутворення (env-налаштовувані, щоб не лізти в код) ---
 MIN_MARKUP_ABS=num(os.environ.get("MIN_MARKUP_ABS") or 150)      # мін. абсолютна націнка (грн) для дешевих позицій
-MAX_DROP_PCT=num(os.environ.get("MAX_DROP_PCT") or 25)/100.0     # зниження діючої ціни > цього % без конкурента -> УТРИМАТИ (не пушити)
-ANCHOR_FLOOR=num(os.environ.get("ANCHOR_FLOOR") or 60)/100.0     # не пушити ціну нижче цього % від якоря 30.06 без конкурента -> УТРИМАТИ
+MAX_DROP_PCT=num(os.environ.get("MAX_DROP_PCT") or 25)/100.0     # зниження діючої ціни > цього % без конкурента -> УТРИМАТИ (не писати)
+ANCHOR_FLOOR=num(os.environ.get("ANCHOR_FLOOR") or 60)/100.0     # не писати ціну нижче цього % від якоря 30.06 без конкурента -> УТРИМАТИ
 def load_anchor(path=None):
     """Якір реальних цін до поломки (export 30.06): article(UPPER)->price. CSV: article,anchor_price."""
     path=path or os.environ.get("ANCHOR_CSV") or "anchor_prices.csv"; m={}
@@ -187,88 +190,29 @@ def load_map(gc, tab):
     except Exception as e: print(f"[{tab}] {str(e)[:50]}")
     return m
 
-def presence_val(av, qty):
-    a=(av or "").lower()
-    if "наяв" in a or av=="available": return "available"
-    if "замов" in a or av=="order": return "order"
-    return "available" if num(qty)>0 else "order"
+def read_export(gc):
+    """Каталог Prom із вкладки «Export Products Sheet» (те, що тягне Prom).
+    Повертає (ws, vals[2D, з паддінгом], idx: код(UPPER)->індекс рядка)."""
+    ss=gc.open_by_key(ID_HUB)
+    ws=ss.worksheet(EXPORT_TAB)
+    vals=ws.get_all_values()
+    width=max(C_QTY+1, max((len(r) for r in vals), default=0))
+    for r in vals:                                     # вирівняти ширину, щоб безпечно писати по індексах
+        if len(r)<width: r.extend([""]*(width-len(r)))
+    idx={}
+    for i,r in enumerate(vals):
+        if i==0: continue                              # заголовок
+        code=str(r[C_CODE]).strip().upper()
+        if code: idx[code]=i
+    return ws, vals, idx
 
-def _prom_get(token, url):
-    req=urllib.request.Request(url, headers={"Authorization":"Bearer "+token})
-    with urllib.request.urlopen(req, timeout=60) as r: return json.loads(r.read().decode())
-
-def prom_group_ids(token):
-    """Усі id груп товарів на Prom (+ None = базовий список без групи)."""
-    ids=[None]; last=None
-    for _ in range(300):
-        url=API_BASE+"/groups/list?limit=100"+(f"&last_id={last}" if last else "")
-        try: data=_prom_get(token,url)
-        except Exception as e: print("[prom-groups]", str(e)[:100]); break
-        gs=data.get("groups", data) if isinstance(data,dict) else data
-        if not gs: break
-        for grp in gs:
-            gid=grp.get("id")
-            if gid is not None: ids.append(gid); last=gid
-        if len(gs)<100: break
-        time.sleep(0.15)
-    return ids
-
-def prom_id_map(token, pinfo=None):
-    """Мапа артикул(sku|external_id, UPPER) -> внутрішній id. Обхід усіх груп.
-    Якщо задано pinfo (dict) — заповнює його даними товару Prom для звіту."""
-    m={}; gids=prom_group_ids(token); print(f"[prom] груп знайдено: {len(gids)-1}")
-    for gid in gids:
-        last=None
-        for _ in range(600):
-            url=API_BASE+"/products/list?limit=100"+(f"&group_id={gid}" if gid is not None else "")+(f"&last_id={last}" if last else "")
-            try: data=_prom_get(token,url)
-            except urllib.error.HTTPError as e: print("[prom-list] HTTP",e.code,e.read().decode()[:120]); break
-            except Exception as e: print("[prom-list]", str(e)[:100]); break
-            prods=data.get("products", data) if isinstance(data,dict) else data
-            if not prods: break
-            for p in prods:
-                pid=p.get("id")
-                if pid is None: continue
-                first=None
-                for key in (p.get("sku"), p.get("external_id")):
-                    k=str(key or "").strip().upper()
-                    if k:
-                        m[k]=pid
-                        if first is None: first=k
-                if pinfo is not None and first:
-                    g=p.get("group")
-                    pinfo[first]={"name":p.get("name",""),"price":p.get("price"),
-                        "presence":p.get("presence"),
-                        "group":(g.get("name") if isinstance(g,dict) else (p.get("group_name") or g or ""))}
-                last=pid
-            if len(prods)<100: break
-            time.sleep(0.1)
-    return m
-
-def push_prom(payload):
-    token=os.environ.get("PROM_API_KEY")
-    if not token or not LIVE:
-        print(f"[prom] DRY-RUN: {len(payload)} товарів НЕ надіслано (LIVE={LIVE}, token={'є' if token else 'нема'})")
-        print("[prom] приклад:", json.dumps(payload[:3], ensure_ascii=False)); return
-    ok=err=0
-    for i in range(0,len(payload),100):
-        chunk=payload[i:i+100]
-        req=urllib.request.Request(PROM_EDIT,data=json.dumps(chunk).encode(),
-            headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"},method="POST")
-        try:
-            with urllib.request.urlopen(req,timeout=60) as rr: json.loads(rr.read().decode()); ok+=len(chunk)
-        except urllib.error.HTTPError as e: err+=1; print("[prom] HTTP",e.code,e.read().decode()[:150])
-        except Exception as e: err+=1; print("[prom]",str(e)[:120])
-        time.sleep(1)
-    print(f"[prom] надіслано ~{ok}, помилок-батчів {err}")
-
-def write_report(gc, pinfo, best, instock, overrides, comps, guard_status=None, final_price_map=None):
-    """Вкладка ЗВІТ у хаб-таблиці: по кожному товару Prom — поточна ціна,
-    нова ціна робота, зміна %, наявність, джерело, статус (утримано/оновлюється/нема постачальника)."""
+def write_report(gc, catalog, best, instock, overrides, comps, guard_status=None, final_price_map=None):
+    """Вкладка «Звіт_Ціни» — ЖУРНАЛ: по кожному товару каталогу — поточна ціна,
+    нова ціна робота, зміна %, наявність, джерело, статус (утримано/оновлено/нема постачальника)."""
     guard_status=guard_status or {}; final_price_map=final_price_map or {}
-    head=["Артикул","Назва (Prom)","Ціна Prom","Ціна нова","Зміна %","Наявність","Джерело","Собівартість","Статус"]
+    head=["Артикул","Назва (Prom)","Ціна Prom","Ціна нова","Зміна %","Наявність","Кількість","Джерело","Собівартість","Статус"]
     rows=[head]
-    for art,info in pinfo.items():
+    for art,info in catalog.items():
         b=best.get(art)
         if b:
             newp=final_price_map.get(art)
@@ -276,11 +220,13 @@ def write_report(gc, pinfo, best, instock, overrides, comps, guard_status=None, 
                 newp=overrides.get(art) or price_with_competitor(b["cost"], comps.get(art))
             cur=num(info.get("price"))
             chg=("%+.0f%%"%(100*(num(newp)-cur)/cur)) if cur>0 else ""
-            pres="в наявності" if instock.get(art,0)>0 else "під замовлення"
-            rows.append([art, info.get("name",""), info.get("price",""), newp, chg, pres,
-                         b.get("brand",""), b.get("cost",""), guard_status.get(art,"оновлюється")])
+            aq=instock.get(art,0)
+            pres="в наявності" if aq>0 else "під замовлення"
+            qty=aq if aq>0 else ""
+            rows.append([art, info.get("name",""), info.get("price",""), newp, chg, pres, qty,
+                         b.get("brand",""), b.get("cost",""), guard_status.get(art,"оновлено")])
         else:
-            rows.append([art, info.get("name",""), info.get("price",""), "", "", "", "", "", "НЕМА ПОСТАЧАЛЬНИКА"])
+            rows.append([art, info.get("name",""), info.get("price",""), "", "", "", "", "", "", "НЕМА ПОСТАЧАЛЬНИКА"])
     ss=gc.open_by_key(ID_HUB)
     RTAB="Звіт_Ціни"                                    # окрема вкладка звіту цін (не плутати з карткою «Звіт»)
     ws=None
@@ -294,68 +240,73 @@ def write_report(gc, pinfo, best, instock, overrides, comps, guard_status=None, 
     print(f"[report] {RTAB}: {len(rows)-1} рядків записано")
 
 def main():
-    gc=gclient(); best={}; instock={}; pinfo={}
-    if gc:
-        read_all_tabs(gc,ID_BMW,"BMW",best,instock)
-        read_all_tabs(gc,ID_PORSCHE,"Porsche",best,instock,force="available")
-    else: print("[gsheet] нема GCP_SA_KEY — таблиці пропущені")
+    gc=gclient()
+    if not gc:
+        print("[fatal] нема GCP_SA_KEY — без доступу до Google-таблиць працювати нема з чим"); return
+    best={}; instock={}
+    read_all_tabs(gc,ID_BMW,"BMW",best,instock)
+    read_all_tabs(gc,ID_PORSCHE,"Porsche",best,instock,force="available")
     folder=os.environ.get("AUTONOVA_FOLDER_ID")
     if folder: pull_autonova_drive(folder,best,instock)   # шлях Drive (без пароля)
     else: pull_autonova(best,instock)                     # запасний шлях: пошта IMAP
-    overrides=load_map(gc,"overrides") if gc else {}
-    comps=load_map(gc,"competitors") if gc else {}
-    anchor=load_anchor()                               # якір реальних цін 30.06 (захист від заниження)
-    items=[]
-    for art,it in best.items():
-        price=overrides.get(art) or price_with_competitor(it["cost"],comps.get(art))
-        aq=instock.get(art,0)                      # пріоритет "в наявності"
-        items.append({"article":art,"price":float(price),
-                      "presence":"available" if aq>0 else "order","qty":aq})
-    print(f"[main] прораховано: {len(items)} товарів")
-    token=os.environ.get("PROM_API_KEY")
-    only=os.environ.get("LIVE_ONLY"); lim=os.environ.get("LIVE_LIMIT")
-    if only:
-        keep=set(a.strip().upper() for a in only.split(",") if a.strip())
-        items=[p for p in items if p["article"] in keep]
-        print(f"[main] LIVE_ONLY канарка: {len(items)} артикулів")
-    payload=[]; held=[]; guard_status={}; final_price_map={}
-    if token and os.environ.get("SKIP_PROM_FILTER")!="1":
-        idmap=prom_id_map(token, pinfo)
-        if idmap:
-            for it in items:
-                art=it["article"]; pid=idmap.get(art)
-                if pid is None: continue
-                newp=float(it["price"]); cur=num((pinfo.get(art) or {}).get("price")); comp=comps.get(art); anc=anchor.get(art)
-                # ЯКІРНИЙ ЗАХИСТ: ціна нижче ANCHOR_FLOOR% від реальної ціни 30.06 без конкурента -> УТРИМАТИ
-                # (ловить заниження навіть коли ДІЮЧА ціна вже зіпсована; головний запобіжник від «в рази менше")
-                if anc and anc>0 and newp < anc*ANCHOR_FLOOR and not (comp and comp>0) and art not in overrides:
-                    held.append((art,anc,newp)); guard_status[art]="УТРИМАНО: <%.0f%% якоря30.06 (было %.0f)"%(ANCHOR_FLOOR*100,anc)
-                    final_price_map[art]=newp; continue
-                # ЗАХИСТ ВІД ЗАНИЖЕННЯ: без реального конкурента й без ручного override
-                # не опускаємо діючу ціну; сильне зниження — УТРИМУЄМО (не пушимо), на ручний огляд.
-                if cur>0 and newp<cur and not (comp and comp>0) and art not in overrides:
-                    if newp < cur*(1-MAX_DROP_PCT):
-                        held.append((art,cur,newp)); guard_status[art]="УТРИМАНО: -%.0f%% без конкурента"%(100*(1-newp/cur))
-                        final_price_map[art]=newp; continue          # НЕ додаємо в payload
-                    newp=cur; guard_status[art]="тримаю діючу (без конкурента)"
-                final_price_map[art]=newp
-                payload.append({"id":int(pid),"price":newp,"presence":it["presence"],
-                                "quantity_in_stock":it["qty"],"status":"on_display"})
-            print(f"[main] on-Prom: {len(idmap)} на Prom -> у payload {len(payload)}, УТРИМАНО {len(held)} (з {len(items)})")
-            if held:
-                print("[guard] УТРИМАНІ (сильне зниження без конкурента, НЕ надіслано):")
-                for a,cur,nw in held[:30]: print(f"[guard]   {a}: {cur:.0f} -> {nw:.0f}")
-        else:
-            print("[main] on-Prom мапа порожня/недоступна — пуш скасовано (безпека)")
+    print(f"[supply] собівартість зібрано: {len(best)} артикулів, у наявності {len(instock)}")
+    overrides=load_map(gc,"overrides"); comps=load_map(gc,"competitors"); anchor=load_anchor()
+
+    ws, vals, idx = read_export(gc)                       # каталог = та вкладка, яку тягне Prom
+    print(f"[export] каталог «{EXPORT_TAB}»: {len(idx)} кодів")
+
+    only=os.environ.get("LIVE_ONLY")
+    keep=set(a.strip().upper() for a in only.split(",") if a.strip()) if only else None
+    catalog={}; guard_status={}; final_price_map={}; held=[]; changed=0
+    for code,i in idx.items():
+        row=vals[i]; cur=num(row[C_PRICE])
+        catalog[code]={"name":row[C_NAME],"price":row[C_PRICE]}
+        it=best.get(code)
+        if not it: continue                              # нема постачальника — не чіпаємо рядок
+        if keep and code not in keep: continue           # канарка LIVE_ONLY
+        comp=comps.get(code); anc=anchor.get(code)
+        newp=overrides.get(code) or price_with_competitor(it["cost"], comp)
+        # ЯКІРНИЙ ЗАХИСТ: нижче ANCHOR_FLOOR% від реальної ціни 30.06 без конкурента -> УТРИМАТИ ціну
+        if anc and anc>0 and newp<anc*ANCHOR_FLOOR and not (comp and comp>0) and code not in overrides:
+            held.append((code,anc,newp)); guard_status[code]="УТРИМАНО: <%.0f%% якоря30.06 (было %.0f)"%(ANCHOR_FLOOR*100,anc)
+            final_price_map[code]=int(cur) if cur>0 else ""; newp=None
+        # ЗАХИСТ ВІД ЗАНИЖЕННЯ: без конкурента/override не опускаємо діючу; сильне зниження -> УТРИМАТИ
+        elif cur>0 and newp<cur and not (comp and comp>0) and code not in overrides:
+            if newp < cur*(1-MAX_DROP_PCT):
+                held.append((code,cur,newp)); guard_status[code]="УТРИМАНО: -%.0f%% без конкурента"%(100*(1-newp/cur))
+                final_price_map[code]=int(cur); newp=None
+            else:
+                newp=cur; guard_status[code]="тримаю діючу (без конкурента)"
+        # наявність(+/дні) + кількість (консервативно: "в наявності" лише коли постачальник реально має склад)
+        aq=instock.get(code,0)
+        if aq>0: row[C_AVAIL]="+"; row[C_QTY]=int(aq)
+        else:    row[C_AVAIL]="15"; row[C_QTY]=""        # під замовлення 15 днів, кількість порожня
+        if newp is not None:                             # ціну пишемо лише якщо не утримано
+            row[C_PRICE]=int(newp)
+            final_price_map[code]=int(newp); guard_status.setdefault(code,"оновлено")
+        changed+=1
+    print(f"[calc] зіставлено з постачальником: {changed}, утримано {len(held)}")
+
+    if LIVE:
+        n=len(vals)
+        colI=[[vals[r][C_PRICE]] for r in range(1,n)]
+        colP=[[vals[r][C_AVAIL]] for r in range(1,n)]
+        colQ=[[vals[r][C_QTY]]   for r in range(1,n)]
+        ws.update(values=colI, range_name=f"I2:I{n}", value_input_option="RAW")
+        ws.update(values=colP, range_name=f"P2:P{n}", value_input_option="RAW")
+        ws.update(values=colQ, range_name=f"Q2:Q{n}", value_input_option="RAW")
+        print(f"[export] ЗАПИСАНО в «{EXPORT_TAB}»: {changed} рядків (ціна/наявність/кількість). Prom підтягне фідом.")
     else:
-        print("[main] нема токена / SKIP — без мапи id пуш неможливий")
-    if lim:
-        try: payload=payload[:int(lim)]; print(f"[main] LIVE_LIMIT: {len(payload)}")
-        except: pass
-    print(f"[main] до пушу: {len(payload)}")
-    push_prom(payload)
-    if gc and pinfo:                                   # звіт у таблицю (панель, видимість)
-        try: write_report(gc, pinfo, best, instock, overrides, comps, guard_status, final_price_map)
-        except Exception as e: print("[report]", str(e)[:140])
+        print(f"[export] DRY-RUN (LIVE≠1): у «{EXPORT_TAB}» НЕ писав. Приклади порахованого:")
+        shown=0
+        for code,i in idx.items():
+            if code in final_price_map and str(final_price_map[code])!="" and shown<8:
+                print(f"   {code}: ціна={vals[i][C_PRICE]} наяв={vals[i][C_AVAIL]} к-ть={vals[i][C_QTY]}"); shown+=1
+
+    try: write_report(gc, catalog, best, instock, overrides, comps, guard_status, final_price_map)
+    except Exception as e: print("[report]", str(e)[:140])
+    if held:
+        print("[guard] УТРИМАНІ (сильне зниження без конкурента, ціну НЕ чіпав; перші 30):")
+        for a,c,nw in held[:30]: print(f"[guard]   {a}: {c:.0f} -> {nw:.0f}")
 
 if __name__=="__main__": main()
