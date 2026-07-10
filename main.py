@@ -194,7 +194,17 @@ def read_export(gc):
     """Каталог Prom із вкладки «Export Products Sheet» (те, що тягне Prom).
     Повертає (ws, vals[2D, з паддінгом], idx: код(UPPER)->індекс рядка)."""
     ss=gc.open_by_key(ID_HUB)
-    ws=ss.worksheet(EXPORT_TAB)
+    import re as _re
+    keyf=lambda s:_re.sub(r"[^a-z0-9]","",str(s).lower())   # лишити тільки літери/цифри: стійко до пробілів/nbsp/невидимих символів/пунктуації
+    want=keyf(EXPORT_TAB)
+    ws=None
+    for w in ss.worksheets():
+        if keyf(w.title)==want: ws=w; break
+    if ws is None:
+        titles=[w.title for w in ss.worksheets()]
+        print(f"[fatal] вкладку «{EXPORT_TAB}» не знайдено у хабі. Наявні вкладки: {titles}")
+        raise SystemExit(2)
+    print(f"[export] вкладка знайдена: «{ws.title}»")
     vals=ws.get_all_values()
     width=max(C_QTY+1, max((len(r) for r in vals), default=0))
     for r in vals:                                     # вирівняти ширину, щоб безпечно писати по індексах
