@@ -267,45 +267,43 @@ def main():
 
     only=os.environ.get("LIVE_ONLY")
     keep=set(a.strip().upper() for a in only.split(",") if a.strip()) if only else None
-    catalog={}; guard_status={}; final_price_map={}; held=[]; changed=0
+    catalog={}; guard_status={}; final_price_map={}; held=[]; updates=[]; matched=0
     for code,i in idx.items():
         row=vals[i]; cur=num(row[C_PRICE])
         catalog[code]={"name":row[C_NAME],"price":row[C_PRICE]}
         it=best.get(code)
-        if not it: continue                              # нема постачальника — не чіпаємо рядок
-        if keep and code not in keep: continue           # канарка LIVE_ONLY
+        if not it: continue                              # нема постачальника — рядок НЕ чіпаємо взагалі
+        if keep and code not in keep: continue           # канарка LIVE_ONLY (якщо задано)
+        matched+=1
         comp=comps.get(code); anc=anchor.get(code)
         newp=overrides.get(code) or price_with_competitor(it["cost"], comp)
         # ЯКІРНИЙ ЗАХИСТ: нижче ANCHOR_FLOOR% від реальної ціни 30.06 без конкурента -> УТРИМАТИ ціну
         if anc and anc>0 and newp<anc*ANCHOR_FLOOR and not (comp and comp>0) and code not in overrides:
-            held.append((code,anc,newp)); guard_status[code]="УТРИМАНО: <%.0f%% якоря30.06 (было %.0f)"%(ANCHOR_FLOOR*100,anc)
-            final_price_map[code]=int(cur) if cur>0 else ""; newp=None
+            held.append((code,anc,newp)); guard_status[code]="УТРИМАНО: <%.0f%% якоря30.06 (было %.0f)"%(ANCHOR_FLOOR*100,anc); newp=None
         # ЗАХИСТ ВІД ЗАНИЖЕННЯ: без конкурента/override не опускаємо діючу; сильне зниження -> УТРИМАТИ
         elif cur>0 and newp<cur and not (comp and comp>0) and code not in overrides:
             if newp < cur*(1-MAX_DROP_PCT):
-                held.append((code,cur,newp)); guard_status[code]="УТРИМАНО: -%.0f%% без конкурента"%(100*(1-newp/cur))
-                final_price_map[code]=int(cur); newp=None
+                held.append((code,cur,newp)); guard_status[code]="УТРИМАНО: -%.0f%% без конкурента"%(100*(1-newp/cur)); newp=None
             else:
                 newp=cur; guard_status[code]="тримаю діючу (без конкурента)"
-        # наявність(+/дні) + кількість (консервативно: "в наявності" лише коли постачальник реально має склад)
-        aq=instock.get(code,0)
+        aq=instock.get(code,0)                            # наявність(+/дні) + кількість, консервативно
         if aq>0: row[C_AVAIL]="+"; row[C_QTY]=int(aq)
-        else:    row[C_AVAIL]="15"; row[C_QTY]=""        # під замовлення 15 днів, кількість порожня
-        if newp is not None:                             # ціну пишемо лише якщо не утримано
-            row[C_PRICE]=int(newp)
-            final_price_map[code]=int(newp); guard_status.setdefault(code,"оновлено")
-        changed+=1
-    print(f"[calc] зіставлено з постачальником: {changed}, утримано {len(held)}")
+        else:    row[C_AVAIL]="15"; row[C_QTY]=""         # під замовлення 15 днів, кількість порожня
+        rn=i+1
+        if newp is not None:                              # ціну пишемо ЛИШЕ якщо не утримано
+            row[C_PRICE]=int(newp); final_price_map[code]=int(newp); guard_status.setdefault(code,"оновлено")
+            updates.append({"range":f"I{rn}","values":[[int(newp)]]})            # Ціна(I) — точково цей рядок
+        else:
+            final_price_map[code]=int(cur) if cur>0 else ""                       # утримано: діюча ціна лишається
+        updates.append({"range":f"P{rn}:Q{rn}","values":[[row[C_AVAIL], row[C_QTY]]]})  # Наявність(P)+Кількість(Q)
+    price_upd=sum(1 for u in updates if u["range"].startswith("I"))
+    print(f"[calc] зіставлено {matched}, ціну оновлено {price_upd}, утримано {len(held)}")
 
-    if LIVE:
-        n=len(vals)
-        colI=[[vals[r][C_PRICE]] for r in range(1,n)]
-        colP=[[vals[r][C_AVAIL]] for r in range(1,n)]
-        colQ=[[vals[r][C_QTY]]   for r in range(1,n)]
-        ws.update(values=colI, range_name=f"I2:I{n}", value_input_option="RAW")
-        ws.update(values=colP, range_name=f"P2:P{n}", value_input_option="RAW")
-        ws.update(values=colQ, range_name=f"Q2:Q{n}", value_input_option="RAW")
-        print(f"[export] ЗАПИСАНО в «{EXPORT_TAB}»: {changed} рядків (ціна/наявність/кількість). Prom підтягне фідом.")
+    if LIVE and updates:
+        B=2000                                            # чанки, щоб не перевищити ліміт запиту
+        for j in range(0,len(updates),B):
+            ws.batch_update(updates[j:j+B], value_input_option="RAW")
+        print(f"[export] ЗАПИСАНО в «{EXPORT_TAB}»: ціна {price_upd} + наявність/кількість {matched} рядків (ТІЛЬКИ змінені; утримані та без постачальника не чіпав). Prom підтягне фідом.")
     else:
         print(f"[export] DRY-RUN (LIVE≠1): у «{EXPORT_TAB}» НЕ писав. Приклади порахованого:")
         shown=0
