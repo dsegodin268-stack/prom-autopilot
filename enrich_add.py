@@ -2,11 +2,9 @@
 # -*- coding: utf-8 -*-
 """enrich_add.py — ПАКЕТНЕ додавання позицій з BM Parts у гейт підтвердження.
 Джерело артикулів: обраний постачальник (BMW=таблиця дилера). Беремо N нових (яких ще нема в Export),
-для кожного тягнемо картку з BM Parts (get_product) і будуємо ПОВНИЙ Prom-рядок (138 колонок):
-назва ua/ru, опис-шаблон, пошукові запити ua/ru, фото, ціна за тарифом, наявність, SEO.
+для кожного тягнемо картку з BM Parts (get_product) і будуємо ПОВНИЙ Prom-рядок (138 колонок).
 Пишемо у «Staging_Prom» (повний рядок) + картку огляду в «Звіт додавання позицій» з чекбоксом.
-Prom читає ТІЛЬКИ «Export Products Sheet» — туди копіює Apps Script лише після Підтвердити=TRUE.
-Env: GCP_SA_KEY, BMPARTS_TOKEN, SUPPLIER(BMW), COUNT(1/10/50/100), ARTICLE(опц. — тест на 1 конкретному)."""
+Env: GCP_SA_KEY, BMPARTS_TOKEN, SUPPLIER, COUNT, ARTICLE(опц. тест)."""
 import os, json, math, html, re, datetime
 
 ID_HUB = "1pesHiOHDq2Y4FYQECakfhIJlq08bg5_Pkm9e2YEDoic"
@@ -14,7 +12,6 @@ PRODUCTS_TAB = os.environ.get("PRODUCTS_TAB", "Export Products Sheet")
 STAGING_TAB  = os.environ.get("STAGING_TAB", "Staging_Prom")
 REVIEW_TAB   = os.environ.get("REVIEW_TAB", "Звіт додавання позицій")
 
-# постачальник -> таблиця-джерело артикулів (кол. A = артикул)
 SUPPLIERS = {
     "BMW":     "1KXaDLqBsOAtX0MxUoX39jpia9boISxl1xUxPihhU77I",
     "PORSCHE": "1oVSVg1cBxGj-DA66c5_FoAtp6zOthdnF_xTY_ugez2g",
@@ -51,6 +48,13 @@ def esc(s): return html.escape(str(s or ""))
 def gclient():
     import gspread
     return gspread.service_account_from_dict(json.loads(os.environ["GCP_SA_KEY"]))
+
+def find_ws(ss, name):
+    key=lambda s: re.sub(r"[^a-z0-9]", "", str(s).lower())
+    want=key(name)
+    for w in ss.worksheets():
+        if key(w.title)==want: return w
+    return None
 
 def col_idx(header, *names):
     low=[str(h).strip().lower() for h in header]
@@ -168,7 +172,6 @@ def build_fields(product):
     return f, name_ua, imgs, details, price
 
 def supplier_articles(gc, supplier):
-    """Усі артикули з таблиці постачальника (кол. A всіх вкладок), у порядку появи, без дублів."""
     sid=SUPPLIERS.get(supplier.upper())
     if not sid: print(f"[src] невідомий постачальник {supplier}"); return []
     out=[]; seen=set()
@@ -192,21 +195,22 @@ def main():
     count=int(num(os.environ.get("COUNT","1")) or 1)
     only=os.environ.get("ARTICLE","").strip()
     gc=gclient(); ss=gc.open_by_key(ID_HUB)
-    src=ss.worksheet(PRODUCTS_TAB); header=src.row_values(1)
-    C=col_idx(header,"Код_товару") ; C = C if C>=0 else 0
+    src=find_ws(ss, PRODUCTS_TAB)
+    if src is None:
+        print(f"[fatal] нема вкладки {PRODUCTS_TAB}. Наявні: {[w.title for w in ss.worksheets()]}"); return
+    header=src.row_values(1)
+    C=col_idx(header,"Код_товару"); C = C if C>=0 else 0
     print(f"=== Export: {len(header)} колонок, ключ у кол.{C+1} ===")
 
-    have=set(a.strip().upper() for a in src.col_values(C+1)[1:] if a.strip())      # вже в Export
-    # вже у Staging (щоб не дублювати між прогонами)
-    try:
-        stg=ss.worksheet(STAGING_TAB); stg_header=stg.row_values(1)
-        if stg_header!=header:
+    have=set(a.strip().upper() for a in src.col_values(C+1)[1:] if a.strip())
+    stg=find_ws(ss, STAGING_TAB)
+    if stg is None:
+        stg=ss.add_worksheet(title=STAGING_TAB, rows=200, cols=max(len(header),26)); stg.update(values=[header], range_name="A1"); staged=set()
+    else:
+        if stg.row_values(1)!=header:
             stg.resize(rows=max(stg.row_count,200), cols=len(header)); stg.update(values=[header], range_name="A1")
         staged=set(a.strip().upper() for a in stg.col_values(1)[1:] if a.strip())
-    except Exception:
-        stg=ss.add_worksheet(title=STAGING_TAB, rows=200, cols=max(len(header),26)); stg.update(values=[header], range_name="A1"); staged=set()
 
-    # список кандидатів
     if only:
         candidates=[only]; count=1; print(f"[mode] ТЕСТ на 1 артикулі: {only}")
     else:
@@ -215,14 +219,14 @@ def main():
 
     bm=BMParts()
     stg_rows=[]; review_rows=[]; today=datetime.date.today().isoformat()
-    scanned=0; cap=max(count*40, 60)                                # запобіжник від нескінченного скану
+    scanned=0; cap=max(count*40, 60)
     for art in candidates:
         if len(stg_rows)>=count: break
-        if scanned>=cap and not only: print(f"[scan] досягнуто ліміт скану {cap}"); break
+        if scanned>=cap and not only: print(f"[scan] ліміт скану {cap}"); break
         scanned+=1
         try: prod=bm.get_product(art)
         except Exception as e: print(f"[bm] {art}: {str(e)[:60]}"); continue
-        if not prod: continue                                       # BM Parts не має картки — пропуск
+        if not prod: continue
         fields,name_ua,imgs,details,price=build_fields(prod)
         full=[""]*len(header)
         for k,v in fields.items():
@@ -236,25 +240,23 @@ def main():
         print(f"[add] {art} — {name_ua[:40]} | ціна {price} | фото {len(imgs)} | {vs}")
 
     if not stg_rows:
-        print("[done] нових позицій із карткою BM Parts не знайдено (все вже в Export або нема в BM Parts)"); return
+        print("[done] нових позицій із карткою BM Parts не знайдено"); return
 
     stg.append_rows(stg_rows, value_input_option="RAW")
-    print(f"[staging] додано {len(stg_rows)} повних рядків")
+    print(f"[staging] додано {len(stg_rows)} рядків")
 
     rhead=["Артикул","Назва","Ціна","Наявність","Фото","Характеристик","Валідатор","Постачальник","Статус","Дата","Підтвердити"]
-    try:
-        rv=ss.worksheet(REVIEW_TAB)
-        if rv.row_values(1)!=rhead: rv.update(values=[rhead], range_name="A1")
-    except Exception:
+    rv=find_ws(ss, REVIEW_TAB)
+    if rv is None:
         rv=ss.add_worksheet(title=REVIEW_TAB, rows=400, cols=len(rhead)); rv.update(values=[rhead], range_name="A1")
+    elif rv.row_values(1)!=rhead:
+        rv.update(values=[rhead], range_name="A1")
     start=len(rv.col_values(1))+1
     rv.append_rows(review_rows, value_input_option="USER_ENTERED")
     conf=col_idx(rhead,"Підтвердити")
-    ss.batch_update({"requests":[{"setDataValidation":{
-        "range":{"sheetId":rv.id,"startRowIndex":1,"startColumnIndex":conf,"endColumnIndex":conf+1},
-        "rule":{"condition":{"type":"BOOLEAN"},"showCustomUi":True}}}]})
-    print(f"[review] «{REVIEW_TAB}»: додано {len(review_rows)} карток (з рядка {start}), чекбокс у кол.{conf+1}")
-    print(">>> Постав галку «Підтвердити» → Apps Script копіює повний рядок зі Staging_Prom у Export Products Sheet.")
+    ss.batch_update({"requests":[{"setDataValidation":{"range":{"sheetId":rv.id,"startRowIndex":1,"startColumnIndex":conf,"endColumnIndex":conf+1},"rule":{"condition":{"type":"BOOLEAN"},"showCustomUi":True}}}]})
+    print(f"[review] {REVIEW_TAB}: додано {len(review_rows)} карток (з рядка {start}), чекбокс кол.{conf+1}")
+    print(">>> Постав галку Підтвердити -> Apps Script копіює рядок зі Staging_Prom у Export.")
 
 if __name__=="__main__":
     main()
