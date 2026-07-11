@@ -220,7 +220,7 @@ def write_report(gc, catalog, best, instock, overrides, comps, guard_status=None
     """Вкладка «Звіт_Ціни» — ЖУРНАЛ: по кожному товару каталогу — поточна ціна,
     нова ціна робота, зміна %, наявність, джерело, статус (утримано/оновлено/нема постачальника)."""
     guard_status=guard_status or {}; final_price_map=final_price_map or {}
-    head=["Артикул","Назва (Prom)","Ціна Prom","Ціна нова","Зміна %","Наявність","Кількість","Джерело","Собівартість","Статус"]
+    head=["Артикул","Назва (Prom)","Ціна нова","Зміна %","Наявність","Кількість","Джерело","Собівартість","Статус"]
     rows=[head]
     for art,info in catalog.items():
         b=best.get(art)
@@ -233,10 +233,10 @@ def write_report(gc, catalog, best, instock, overrides, comps, guard_status=None
             aq=instock.get(art,0)
             pres="в наявності" if aq>0 else "під замовлення"
             qty=aq if aq>0 else ""
-            rows.append([art, info.get("name",""), info.get("price",""), newp, chg, pres, qty,
+            rows.append([art, info.get("name",""), newp, chg, pres, qty,
                          b.get("brand",""), b.get("cost",""), guard_status.get(art,"оновлено")])
         else:
-            rows.append([art, info.get("name",""), info.get("price",""), "", "", "", "", "", "", "НЕМА ПОСТАЧАЛЬНИКА"])
+            rows.append([art, info.get("name",""), "", "", "", "", "", "", "НЕМА ПОСТАЧАЛЬНИКА"])
     ss=gc.open_by_key(ID_HUB)
     RTAB="Звіт_Ціни"                                    # окрема вкладка звіту цін (не плутати з карткою «Звіт»)
     ws=None
@@ -260,7 +260,7 @@ def main():
     if folder: pull_autonova_drive(folder,best,instock)   # шлях Drive (без пароля)
     else: pull_autonova(best,instock)                     # запасний шлях: пошта IMAP
     print(f"[supply] собівартість зібрано: {len(best)} артикулів, у наявності {len(instock)}")
-    overrides=load_map(gc,"overrides"); comps=load_map(gc,"competitors"); anchor=load_anchor()
+    overrides=load_map(gc,"overrides"); comps=load_map(gc,"competitors")
 
     ws, vals, idx = read_export(gc)                       # каталог = та вкладка, яку тягне Prom
     print(f"[export] каталог «{EXPORT_TAB}»: {len(idx)} кодів")
@@ -275,29 +275,17 @@ def main():
         if not it: continue                              # нема постачальника — рядок НЕ чіпаємо взагалі
         if keep and code not in keep: continue           # канарка LIVE_ONLY (якщо задано)
         matched+=1
-        comp=comps.get(code); anc=anchor.get(code)
-        newp=overrides.get(code) or price_with_competitor(it["cost"], comp)
-        # ЯКІРНИЙ ЗАХИСТ: нижче ANCHOR_FLOOR% від реальної ціни 30.06 без конкурента -> УТРИМАТИ ціну
-        if anc and anc>0 and newp<anc*ANCHOR_FLOOR and not (comp and comp>0) and code not in overrides:
-            held.append((code,anc,newp)); guard_status[code]="УТРИМАНО: <%.0f%% якоря30.06 (было %.0f)"%(ANCHOR_FLOOR*100,anc); newp=None
-        # ЗАХИСТ ВІД ЗАНИЖЕННЯ: без конкурента/override не опускаємо діючу; сильне зниження -> УТРИМАТИ
-        elif cur>0 and newp<cur and not (comp and comp>0) and code not in overrides:
-            if newp < cur*(1-MAX_DROP_PCT):
-                held.append((code,cur,newp)); guard_status[code]="УТРИМАНО: -%.0f%% без конкурента"%(100*(1-newp/cur)); newp=None
-            else:
-                newp=cur; guard_status[code]="тримаю діючу (без конкурента)"
-        aq=instock.get(code,0)                            # наявність(+/дні) + кількість, консервативно
+        comp=comps.get(code)
+        newp=overrides.get(code) or price_with_competitor(it["cost"], comp)   # ціна = собівартість × тариф (або конкурент/ручна). БЕЗ утримання — застосовуємо завжди.
+        aq=instock.get(code,0)                            # наявність(+/дні) + кількість
         if aq>0: row[C_AVAIL]="+"; row[C_QTY]=int(aq)
         else:    row[C_AVAIL]="15"; row[C_QTY]=""         # під замовлення 15 днів, кількість порожня
         rn=i+1
-        if newp is not None:                              # ціну пишемо ЛИШЕ якщо не утримано
-            row[C_PRICE]=int(newp); final_price_map[code]=int(newp); guard_status.setdefault(code,"оновлено")
-            updates.append({"range":f"I{rn}","values":[[int(newp)]]})            # Ціна(I) — точково цей рядок
-        else:
-            final_price_map[code]=int(cur) if cur>0 else ""                       # утримано: діюча ціна лишається
+        row[C_PRICE]=int(newp); final_price_map[code]=int(newp); guard_status[code]="оновлено"
+        updates.append({"range":f"I{rn}","values":[[int(newp)]]})              # Ціна(I) — точково цей рядок
         updates.append({"range":f"P{rn}:Q{rn}","values":[[row[C_AVAIL], row[C_QTY]]]})  # Наявність(P)+Кількість(Q)
     price_upd=sum(1 for u in updates if u["range"].startswith("I"))
-    print(f"[calc] зіставлено {matched}, ціну оновлено {price_upd}, утримано {len(held)}")
+    print(f"[calc] зіставлено {matched}, ціну оновлено {price_upd} (усі застосовано, без утримання)")
 
     if LIVE and updates:
         B=2000                                            # чанки, щоб не перевищити ліміт запиту
