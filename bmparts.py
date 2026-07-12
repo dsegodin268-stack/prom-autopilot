@@ -4,6 +4,7 @@
 import os
 import re
 import json
+import time
 
 API = "https://api.bm.parts"
 CDN = "https://cdn.bm.parts"
@@ -22,6 +23,15 @@ class BMParts:
         self.s = requests.Session()
         self.s.headers.update({"Authorization": self.token, "User-Agent": UA,
                                "Accept": "application/json"})
+        self._last = 0.0
+        self._min = float(os.environ.get("BM_MIN_INTERVAL", "2.5"))  # мін. інтервал між запитами BM Parts, с
+
+    def _throttle(self):
+        """Тримає щонайменше self._min секунд між запитами — щоб BM Parts не різав бурст."""
+        wait = self._min - (time.time() - self._last)
+        if wait > 0:
+            time.sleep(wait)
+        self._last = time.time()
 
     def _check(self, r):
         """На 4xx/5xx друкує діагностику (статус, server/cf-ray, тіло) — без токена — і кидає."""
@@ -36,6 +46,7 @@ class BMParts:
 
     def search_uuid(self, article):
         """Артикул → UUID через GET /search/products (endpoint /product/{uuid} приймає ЛИШЕ uuid)."""
+        self._throttle()
         r = self.s.get(f"{API}/search/products",
                        params={"q": article, "search_mode": "strict"}, timeout=40)
         self._check(r)
@@ -60,6 +71,7 @@ class BMParts:
         if not uuid:
             return None
         params = {"output_field": "all", "oe": "full", "warehouses": "all"}
+        self._throttle()
         r = self.s.get(f"{API}/product/{uuid}", params=params, timeout=40)
         if r.status_code in (404, 422):
             return None
@@ -69,6 +81,7 @@ class BMParts:
     def prom_price_csv(self, brand_name, warehouses):
         """POST /prices/prom/{brand_name} — прайс одразу у форматі імпорту Prom.ua."""
         body = {"currency": UA_CURRENCY, "warehouses": warehouses}
+        self._throttle()
         r = self.s.post(f"{API}/prices/prom/{brand_name}", json=body, timeout=120)
         r.raise_for_status()
         return r.text
@@ -76,6 +89,7 @@ class BMParts:
     def photos_csv(self, brands=None):
         """POST /lists/photos_link — CSV «ІД, артикул, бренд, посилання на фото»."""
         body = {"brands": brands} if brands else {}
+        self._throttle()
         r = self.s.post(f"{API}/lists/photos_link", json=body, timeout=120)
         r.raise_for_status()
         return r.text
