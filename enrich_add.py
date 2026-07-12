@@ -258,5 +258,23 @@ def main():
     print(f"[review] {REVIEW_TAB}: додано {len(review_rows)} карток (з рядка {start}), чекбокс кол.{conf+1}")
     print(">>> Постав галку Підтвердити -> Apps Script копіює рядок зі Staging_Prom у Export.")
 
+def _write_log(text):
+    try:
+        gc=gclient(); ss=gc.open_by_key(ID_HUB)
+        lg=find_ws(ss,"Лог_додавання")
+        if lg is None: lg=ss.add_worksheet(title="Лог_додавання", rows=50, cols=2)
+        import datetime as _d
+        lg.update(values=[["останній прогін "+_d.datetime.utcnow().isoformat()], [text[-45000:]]], range_name="A1")
+    except Exception as e:
+        print("[log] запис у вкладку не вдався:", str(e)[:80])
+
 if __name__=="__main__":
-    main()
+    import io as _io, contextlib as _c, traceback as _tb
+    _buf=_io.StringIO()
+    try:
+        with _c.redirect_stdout(_buf): main()
+    except Exception:
+        _buf.write("\nTRACEBACK:\n"+_tb.format_exc())
+    _out=_buf.getvalue()
+    print(_out)
+    _write_log(_out)
