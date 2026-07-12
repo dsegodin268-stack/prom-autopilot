@@ -29,7 +29,7 @@ jobs:
       - name: Enrich & stage positions
         env:
           GCP_SA_KEY:    ${{ secrets.GCP_SA_KEY }}
-          BMPARTS_TOKEN: ${{ secrets.BMPARTS_TOKEN }}
+          BMPARTS_TOKEN: ${{ secrets.BMPARTS }}
           SUPPLIER:      ${{ github.event.inputs.supplier }}
           COUNT:         ${{ github.event.inputs.count }}
           ARTICLE:       ${{ github.event.inputs.article }}
