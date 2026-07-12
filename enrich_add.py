@@ -5,7 +5,7 @@
 для кожного тягнемо картку з BM Parts (get_product) і будуємо ПОВНИЙ Prom-рядок (138 колонок).
 Пишемо у «Staging_Prom» (повний рядок) + картку огляду в «Звіт додавання позицій» з чекбоксом.
 Env: GCP_SA_KEY, BMPARTS_TOKEN, SUPPLIER, COUNT, ARTICLE(опц. тест)."""
-import os, json, math, html, re, datetime
+import os, json, math, html, re, datetime, time
 
 ID_HUB = "1pesHiOHDq2Y4FYQECakfhIJlq08bg5_Pkm9e2YEDoic"
 PRODUCTS_TAB = os.environ.get("PRODUCTS_TAB", "Export Products Sheet")
@@ -188,6 +188,19 @@ def supplier_articles(gc, supplier):
     print(f"[src] {supplier}: {len(out)} унікальних артикулів")
     return out
 
+def bm_get_retry(bm, art, tries=4):
+    """get_product із повтором на тимчасовий 403/429 (rate-limit BM Parts). Бекоф 3/8/15/30 c."""
+    delays=[3,8,15,30]
+    for i in range(tries):
+        try:
+            return bm.get_product(art)
+        except Exception as e:
+            msg=str(e)
+            if ("403" in msg or "429" in msg) and i < tries-1:
+                print(f"[bm-retry] {art}: {msg[:45]} - пауза {delays[i]}c"); time.sleep(delays[i]); continue
+            print(f"[bm] {art}: {msg[:60]}"); return None
+    return None
+
 def main():
     from bmparts import BMParts
     from validator import validate_card, summarize
@@ -224,8 +237,8 @@ def main():
         if len(stg_rows)>=count: break
         if scanned>=cap and not only: print(f"[scan] ліміт скану {cap}"); break
         scanned+=1
-        try: prod=bm.get_product(art)
-        except Exception as e: print(f"[bm] {art}: {str(e)[:60]}"); continue
+        time.sleep(0.8)                                    # тротлінг проти rate-limit BM Parts
+        prod=bm_get_retry(bm, art)
         if not prod: continue
         fields,name_ua,imgs,details,price=build_fields(prod)
         full=[""]*len(header)
