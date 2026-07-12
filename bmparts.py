@@ -1,6 +1,6 @@
 # bmparts.py — клієнт BM Parts API v2 + збирач картки Prom за ПРАВИЛА_PROM.md
 # Токен читається з env BMPARTS_TOKEN (я його не бачу). Auth: header "Authorization: <token>".
-# Джерело специфікації: developer.bm.parts/api/v2 (product.html, prices.html, lists.html, search_products.html).
+# Джерело специфікації: developer.bm.parts/api/v2 (product.html, prices.html, lists.html).
 import os
 import re
 import json
@@ -23,11 +23,22 @@ class BMParts:
         self.s.headers.update({"Authorization": self.token, "User-Agent": UA,
                                "Accept": "application/json"})
 
+    def _check(self, r):
+        """На 4xx/5xx друкує діагностику (статус, server/cf-ray, тіло) — без токена — і кидає."""
+        if r.status_code >= 400:
+            srv = r.headers.get("server", "")
+            cf  = r.headers.get("cf-ray", "")
+            body = (r.text or "")[:400].replace("\n", " ")
+            print(f"[bm-http] {r.status_code} {r.request.method} {r.url}")
+            print(f"[bm-http] server={srv!r} cf-ray={cf!r} sent_auth_len={len(self.token)}")
+            print(f"[bm-http] body={body!r}")
+        r.raise_for_status()
+
     def search_uuid(self, article):
-        """Артикул -> UUID через GET /search/products (endpoint /product/{uuid} приймає ЛИШЕ uuid)."""
+        """Артикул → UUID через GET /search/products (endpoint /product/{uuid} приймає ЛИШЕ uuid)."""
         r = self.s.get(f"{API}/search/products",
                        params={"q": article, "search_mode": "strict"}, timeout=40)
-        r.raise_for_status()
+        self._check(r)
         products = r.json().get("products") or {}
         norm = lambda s: re.sub(r"\s+", "", str(s or "")).lower()
         target = norm(article)
@@ -35,7 +46,7 @@ class BMParts:
             for uuid, p in products.items():
                 if norm(p.get("article")) == target:
                     return uuid
-            return next(iter(products), None)   # запасний перший
+            return next(iter(products), None)   # запасний — перший
         if isinstance(products, list):          # arr-режим: uuid у полі
             for p in products:
                 if norm(p.get("article")) == target:
@@ -44,7 +55,7 @@ class BMParts:
         return None
 
     def get_product(self, code, by_code=True):
-        """Артикул -> пошук UUID -> GET /product/{uuid} (назва, details, oe, analogs, cars, images)."""
+        """Артикул → пошук UUID → GET /product/{uuid} (назва, details, oe, analogs, cars, images)."""
         uuid = self.search_uuid(code) if by_code else code
         if not uuid:
             return None
@@ -52,7 +63,7 @@ class BMParts:
         r = self.s.get(f"{API}/product/{uuid}", params=params, timeout=40)
         if r.status_code in (404, 422):
             return None
-        r.raise_for_status()
+        self._check(r)
         return r.json().get("product", r.json())
 
     def prom_price_csv(self, brand_name, warehouses):
@@ -72,7 +83,7 @@ class BMParts:
 
 # ---------- Збирач картки (чисті функції, без мережі) ----------
 def parse_details(details):
-    """details {"Наружный диаметр [мм]": "76,00", ...} -> [(назва, одиниця, значення)]."""
+    """details {"Наружный диаметр [мм]": "76,00", ...} → [(назва, одиниця, значення)]."""
     out = []
     for k, v in (details or {}).items():
         m = re.search(r"\[([^\]]+)\]\s*$", k)
@@ -84,7 +95,7 @@ def parse_details(details):
 
 
 def clean_name(name):
-    """Назва для поля Prom: без дефіса, без подвійних пробілів, <=110 (правила Prom)."""
+    """Назва для поля Prom: без «-», без подвійних пробілів, ≤110 (правила Prom)."""
     n = (name or "").replace("—", " ").replace("–", " ").replace("-", " ")
     n = re.sub(r"\s+", " ", n).strip()
     return n[:110].strip()
@@ -111,7 +122,7 @@ def oem_and_replacements(product):
 
 
 def fitment_lines(product):
-    """cars[] -> рядки сумісності. Структура cars гнучка -> збираємо захищено."""
+    """cars[] → рядки сумісності. Структура cars гнучка → збираємо захищено."""
     cars = product.get("cars") or []
     out = []
     for c in cars:
@@ -151,16 +162,16 @@ def build_parts_description(product):
 
 
 def assemble_card(product):
-    """BM Parts product -> картка для валідатора/Prom."""
+    """BM Parts product → картка для валідатора/Prom."""
     images = [cdn_url(p) for p in (product.get("images") or [])]
     return {
         "name": clean_name(product.get("name")),
-        "name_source": product.get("name"),          # оригінал (RU -> UA-переклад = крок ШІ)
+        "name_source": product.get("name"),          # оригінал (може бути RU → UA-переклад = крок ШІ)
         "description": build_parts_description(product),
         "chars": parse_details(product.get("details")),
         "images": images,
         "price": product.get("price"),
-        "group_hint": product.get("nodes"),          # категорія BM Parts -> мапити на групу Prom
+        "group_hint": product.get("nodes"),          # категорія BM Parts → мапити на групу Prom
         "product_id": product.get("article"),
         "group_id": None,                             # ставиться на етапі мапінгу груп
         "brand": product.get("brand"),
