@@ -78,6 +78,13 @@ class BMParts:
         self._check(r)
         return r.json().get("product", r.json())
 
+    def warehouses(self):
+        """GET /company/warehouses -> [{uuid,name,...}] реальних складів клієнта."""
+        self._throttle()
+        r = self.s.get(f"{API}/company/warehouses", timeout=40)
+        self._check(r)
+        return r.json().get("warehouses") or []
+
     def prom_price_csv(self, brand_name, warehouses):
         """POST /prices/prom/{brand_name} — прайс одразу у форматі імпорту Prom.ua."""
         body = {"currency": UA_CURRENCY, "warehouses": warehouses}
@@ -198,6 +205,16 @@ if __name__ == "__main__":
     from validator import validate_card, summarize
     art = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PROBE_ARTICLE", "")).strip()
     bm = BMParts()
+    if art.upper().startswith("BULK"):
+        brand = art.split(":",1)[1].strip() if ":" in art else "BMW"
+        whs = bm.warehouses(); wh = [w["uuid"] for w in whs]
+        print("[bulk] склади(%d): %s" % (len(whs), ", ".join("%s=%s" % (w.get("name"), w.get("uuid")) for w in whs)))
+        csv = bm.prom_price_csv(brand, wh)
+        lines = csv.splitlines()
+        print("[bulk] бренд=%s всього рядків=%d" % (brand, len(lines)))
+        for ln in lines[:15]:
+            print("[bulk] " + ln[:300])
+        sys.exit(0)
     prod = bm.get_product(art)
     if not prod:
         print(f"[bmparts] артикул {art!r} не знайдено"); sys.exit(1)
