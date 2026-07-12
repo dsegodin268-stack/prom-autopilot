@@ -7,11 +7,11 @@ on:
         required: true
         default: "BMW"
       target:
-        description: "Куди писати нові позиції"
+        description: "review = список на огляд з галочками; staging/export = повні рядки"
         required: true
-        default: "staging"
+        default: "review"
         type: choice
-        options: ["staging", "export"]
+        options: ["review", "staging", "export"]
       max:
         description: "Ліміт нових рядків (0 = всі)"
         required: false
