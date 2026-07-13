@@ -303,7 +303,8 @@ def ai_enrich(product):
             "messages":[{"role":"system","content":PROM_AI_SYSTEM},
                         {"role":"user","content":json.dumps(facts, ensure_ascii=False)}],
             "temperature":0.3}).encode("utf-8")
-        req=urllib.request.Request("https://models.inference.ai.azure.com/chat/completions",
+        _url=os.environ.get("AI_API_URL","https://models.inference.ai.azure.com/chat/completions")
+        req=urllib.request.Request(_url,
             data=body, headers={"Authorization":"Bearer "+tok,"Content-Type":"application/json"})
         with urllib.request.urlopen(req, timeout=60) as r:
             data=json.loads(r.read().decode("utf-8"))
