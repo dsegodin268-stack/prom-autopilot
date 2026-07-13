@@ -1,0 +1,29 @@
+name: enrich-selected
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Куди писати якісні картки"
+        required: true
+        default: "export"
+        type: choice
+        options: ["export", "staging"]
+      max:
+        description: "Ліміт (0 = всі відмічені)"
+        required: false
+        default: "0"
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -r requirements.txt
+      - name: Enrich selected (quality cards)
+        env:
+          GCP_SA_KEY:    ${{ secrets.GCP_SA_KEY }}
+          BMPARTS_TOKEN: ${{ secrets.BMPARTS }}
+          TARGET:        ${{ github.event.inputs.target }}
+          MAX:           ${{ github.event.inputs.max }}
+        run: python enrich_selected.py
