@@ -24,6 +24,14 @@ REVIEW_TAB = "Огляд_Додавання"
 
 keyf = lambda s: re.sub(r"\s+", " ", str(s or "").strip().lower())
 
+
+def avail_h(v):
+    v = str(v or "").strip()
+    if v in ("+", "!", "true", "True"): return "✅ в наявності"
+    if v.isdigit() and v != "0":        return f"під замовл. ~{v} дн"
+    if v in ("0", "-", ""):             return "немає"
+    return v
+
 def find_ws(sh, name, create_cols=0):
     want = keyf(name)
     for ws in sh.worksheets():
@@ -71,6 +79,10 @@ def main():
     c_price = col("Ціна")
     c_avail = col("Наявність")
     c_photo = col("Посилання_зображення")
+    char_pairs = []                                   # (idx назви, idx значення) характеристик
+    for i, h in enumerate(fh):
+        if keyf(h) == keyf("Назва_Характеристики") and i + 1 < len(fh):
+            char_pairs.append((i, i + 1))
 
     # відбір нових
     new = []
@@ -90,24 +102,46 @@ def main():
 
     if TARGET == "review":
         rv = find_ws(sh, REVIEW_TAB, create_cols=8)
-        header = ["Артикул", "Назва", "Ціна", "Наявність", "Фото", "Взяти", "Статус", "Бренд"]
+        header = ["Фото", "Артикул", "Назва", "Ціна, ₴", "Наявність", "Характеристики", "Взяти", "Статус"]
         out = [header]
         for r in new:
-            photo = (g(r, c_photo) or "").split()[0] if g(r, c_photo) else ""
-            out.append([g(r, c_code), g(r, c_name), g(r, c_price), g(r, c_avail),
-                        photo, False, "", BRAND])
+            url = (g(r, c_photo) or "").split()[0] if g(r, c_photo) else ""
+            photo = f'=IMAGE("{url}")' if url.startswith("http") else ""
+            chars = []
+            for ni, vi in char_pairs:
+                nm, val = g(r, ni), g(r, vi)
+                if nm and val:
+                    chars.append(f"{nm}: {val}")
+                if len(chars) >= 4:
+                    break
+            out.append([photo, g(r, c_code), g(r, c_name), g(r, c_price),
+                        avail_h(g(r, c_avail)), "; ".join(chars), False, ""])
         rv.clear()
         rv.update(f"A1:H{len(out)}", out, value_input_option="USER_ENTERED")
-        # чекбокси на колонку «Взяти» (F, індекс 5)
-        rv.spreadsheet.batch_update({"requests": [{
-            "setDataValidation": {
-                "range": {"sheetId": rv.id, "startRowIndex": 1, "endRowIndex": len(out),
-                          "startColumnIndex": 5, "endColumnIndex": 6},
-                "rule": {"condition": {"type": "BOOLEAN"}, "strict": True}}}]})
-        print(f"[bulk_add] ✅ {len(new)} кандидатів у «{REVIEW_TAB}» з чекбоксом «Взяти»")
-        for r in new[:5]:
-            print("  •", g(r, c_code), "|", (g(r, c_name) or "")[:50])
-        print(">>> Постав галку «Взяти» на потрібних → обрані якісно збагатяться і підуть в Export.")
+        n = len(out)
+        rv.spreadsheet.batch_update({"requests": [
+            {"setDataValidation": {                              # чекбокс «Взяти» (кол. G)
+                "range": {"sheetId": rv.id, "startRowIndex": 1, "endRowIndex": n,
+                          "startColumnIndex": 6, "endColumnIndex": 7},
+                "rule": {"condition": {"type": "BOOLEAN"}, "strict": True}}},
+            {"updateSheetProperties": {                          # заморозити шапку
+                "properties": {"sheetId": rv.id, "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount"}},
+            {"updateDimensionProperties": {                      # висота рядків під фото
+                "range": {"sheetId": rv.id, "dimension": "ROWS", "startIndex": 1, "endIndex": n},
+                "properties": {"pixelSize": 60}, "fields": "pixelSize"}},
+            {"updateDimensionProperties": {                      # ширина «Фото»
+                "range": {"sheetId": rv.id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 1},
+                "properties": {"pixelSize": 70}, "fields": "pixelSize"}},
+            {"updateDimensionProperties": {                      # ширина «Назва»
+                "range": {"sheetId": rv.id, "dimension": "COLUMNS", "startIndex": 2, "endIndex": 3},
+                "properties": {"pixelSize": 320}, "fields": "pixelSize"}},
+            {"updateDimensionProperties": {                      # ширина «Характеристики»
+                "range": {"sheetId": rv.id, "dimension": "COLUMNS", "startIndex": 5, "endIndex": 6},
+                "properties": {"pixelSize": 300}, "fields": "pixelSize"}},
+        ]})
+        print(f"[bulk_add] ✅ {len(new)} кандидатів у «{REVIEW_TAB}»: фото + читабельна наявність + характеристики + чекбокс «Взяти»")
+        print(">>> Постав галку «Взяти» → запусти workflow enrich-selected → обрані з якісними картками підуть у Export.")
     else:
         ex_map = [fidx.get(keyf(h)) for h in ex_header]
         full = [[g(r, j) for j in ex_map] for r in new]
