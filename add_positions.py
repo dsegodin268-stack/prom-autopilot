@@ -4,13 +4,12 @@ add_positions.py — ЄДИНИЙ скрипт додавання позицій
 Замінює bulk_add.py + enrich_selected.py. Наповнення СУВОРО за ПРАВИЛА_PROM
 (перевикористовує build_fields з enrich_add.py — не дублюємо).
 
-MODE=review  : один bulk-виклик /prices/prom/{brand} → нові (нема в Export) → «Огляд_Додавання»
-               (фото-мініатюра, назва, ціна, читабельна наявність, характеристики, ☐«Взяти»).
-MODE=enrich  : читає «Огляд_Додавання» → рядки з «Взяти»=TRUE → per-article get_product →
-               build_fields (ПРАВИЛА_PROM) → повний рядок Prom → «Export Products Sheet».
+MODE=review  : один bulk-виклик /prices/prom/{brand} → нові (нема в Export) → «Огляд_Додавання».
+MODE=enrich  : «Огляд_Додавання» → рядки з «Взяти»=TRUE → get_product → build_fields → «Export Products Sheet».
+               Наявність + Кількість беруться з bulk-фіду BM Parts (get_product їх не віддає).
 
 ENV: GCP_SA_KEY, BMPARTS_TOKEN, MODE(review|enrich), BRAND(=BMW),
-     TARGET(export|staging, для enrich; =export), MAX(опц.), HUB_ID(опц.)
+     TARGET(export|staging; =export), MAX(опц.), HUB_ID(опц.)
 """
 import os, io, csv, json, re
 import gspread
@@ -50,6 +49,32 @@ def avail_h(v):
     if v in ("0", "-", ""):             return "немає"
     return v
 
+def _feed_index(fh):
+    fi = {keyf(h): i for i, h in enumerate(fh)}
+    def col(*ns, d=None):
+        for n in ns:
+            if keyf(n) in fi: return fi[keyf(n)]
+        return d
+    return col
+
+def fetch_stock(bm):
+    """{код: (Наявність, Кількість)} з bulk-фіду BM Parts — джерело наявності й залишку для Export."""
+    stock = {}
+    try:
+        wh = os.environ.get("WAREHOUSES", "").split(",") if os.environ.get("WAREHOUSES") else [w["uuid"] for w in bm.warehouses()]
+        wh = [w for w in wh if w]
+        rows = list(csv.reader(io.StringIO(bm.prom_price_csv(BRAND, wh))))
+        col = _feed_index(rows[0])
+        ic, ia, iq = col("Код_товару", d=0), col("Наявність"), col("Кількість")
+        g = lambda r, i: (r[i] if (i is not None and i < len(r)) else "")
+        for r in rows[1:]:
+            if len(r) > ic and r[ic]:
+                stock[keyf(r[ic])] = (g(r, ia).strip(), g(r, iq).strip())
+        print(f"[add] фід наявності: {len(stock)} кодів")
+    except Exception as e:
+        print(f"[add] фід наявності недоступний ({e}) — Наявність лишиться '+', Кількість порожня")
+    return stock
+
 # ---------------- MODE=review ----------------
 def do_review(sh):
     export = find_ws(sh, "Export Products Sheet")
@@ -60,14 +85,9 @@ def do_review(sh):
     wh = [w for w in wh if w]
     rows = list(csv.reader(io.StringIO(bm.prom_price_csv(BRAND, wh))))
     fh = rows[0]; print(f"[add] фід {BRAND}: {len(rows)-1} рядків")
-    fidx = {}
-    for i, h in enumerate(fh): fidx.setdefault(keyf(h), i)
-    def col(*ns, d=None):
-        for n in ns:
-            if keyf(n) in fidx: return fidx[keyf(n)]
-        return d
+    col = _feed_index(fh)
     c_code, c_name = col("Код_товару", d=0), col("Назва_позиції_укр","Назва_позиції", d=1)
-    c_price, c_avail, c_photo = col("Ціна"), col("Наявність"), col("Посилання_зображення")
+    c_price, c_avail, c_qty, c_photo = col("Ціна"), col("Наявність"), col("Кількість"), col("Посилання_зображення")
     char_pairs = [(i, i+1) for i, h in enumerate(fh) if keyf(h)==keyf("Назва_Характеристики") and i+1 < len(fh)]
     g = lambda r, i: (r[i] if (i is not None and i < len(r)) else "")
 
@@ -81,8 +101,8 @@ def do_review(sh):
     print(f"[add] НОВИХ (нема в Export): {len(new)}")
     if not new: return
 
-    rv = find_ws(sh, REVIEW_TAB, create_cols=8)
-    out = [["Фото","Артикул","Назва","Ціна, ₴","Наявність","Характеристики","Взяти","Статус"]]
+    rv = find_ws(sh, REVIEW_TAB, create_cols=9)
+    out = [["Фото","Артикул","Назва","Ціна, ₴","Наявність","К-ть","Характеристики","Взяти","Статус"]]
     for r in new:
         url = (g(r, c_photo) or "").split()[0] if g(r, c_photo) else ""
         photo = f'=IMAGE("{url}")' if url.startswith("http") else ""
@@ -91,14 +111,14 @@ def do_review(sh):
             nm, val = g(r, ni), g(r, vi)
             if nm and val: chars.append(f"{nm}: {val}")
             if len(chars) >= 4: break
-        out.append([photo, g(r,c_code), g(r,c_name), g(r,c_price), avail_h(g(r,c_avail)),
+        out.append([photo, g(r,c_code), g(r,c_name), g(r,c_price), avail_h(g(r,c_avail)), g(r,c_qty),
                     "; ".join(chars), False, ""])
     rv.clear()
-    rv.update(f"A1:H{len(out)}", out, value_input_option="USER_ENTERED")
+    rv.update(values=out, range_name=f"A1:I{len(out)}", value_input_option="USER_ENTERED")
     n = len(out)
     rv.spreadsheet.batch_update({"requests": [
         {"setDataValidation": {"range": {"sheetId": rv.id, "startRowIndex":1, "endRowIndex":n,
-            "startColumnIndex":6, "endColumnIndex":7}, "rule": {"condition":{"type":"BOOLEAN"}, "strict":True}}},
+            "startColumnIndex":7, "endColumnIndex":8}, "rule": {"condition":{"type":"BOOLEAN"}, "strict":True}}},
         {"updateSheetProperties": {"properties": {"sheetId": rv.id, "gridProperties":{"frozenRowCount":1}},
             "fields": "gridProperties.frozenRowCount"}},
         {"updateDimensionProperties": {"range": {"sheetId": rv.id, "dimension":"ROWS", "startIndex":1, "endIndex":n},
@@ -107,13 +127,29 @@ def do_review(sh):
             "properties": {"pixelSize":70}, "fields":"pixelSize"}},
         {"updateDimensionProperties": {"range": {"sheetId": rv.id, "dimension":"COLUMNS", "startIndex":2, "endIndex":3},
             "properties": {"pixelSize":320}, "fields":"pixelSize"}},
-        {"updateDimensionProperties": {"range": {"sheetId": rv.id, "dimension":"COLUMNS", "startIndex":5, "endIndex":6},
+        {"updateDimensionProperties": {"range": {"sheetId": rv.id, "dimension":"COLUMNS", "startIndex":6, "endIndex":7},
             "properties": {"pixelSize":300}, "fields":"pixelSize"}},
     ]})
-    print(f"[add] ✅ {len(new)} кандидатів у «{REVIEW_TAB}»: фото + наявність + характеристики + ☐«Взяти»")
-    print(">>> Постав «Взяти» → запусти MODE=enrich → обрані з якісними картками (ПРАВИЛА_PROM) у Export.")
+    print(f"[add] ✅ {len(new)} кандидатів у «{REVIEW_TAB}»")
+    print(">>> Постав «Взяти» → MODE=enrich → якісні картки у Export.")
 
 # ---------------- MODE=enrich ----------------
+def _row_from_fields(ex_head, f, chars):
+    """Скаляри — за назвою колонки; характеристики — позиційно у повторювані трійки
+    Назва_Характеристики | Одиниця_виміру_Характеристики | Значення_Характеристики (ПРАВИЛА §6)."""
+    row = [f.get(h, "") for h in ex_head]
+    ci = 0; i = 0
+    while i < len(ex_head) and ci < len(chars):
+        if keyf(ex_head[i]) == keyf("Назва_Характеристики"):
+            nm, unit, val = chars[ci]; ci += 1
+            row[i] = nm
+            if i+1 < len(ex_head): row[i+1] = unit
+            if i+2 < len(ex_head): row[i+2] = val
+            i += 3
+        else:
+            i += 1
+    return row
+
 def do_enrich(sh):
     rv = find_ws(sh, REVIEW_TAB); rows = rv.get_all_values()
     if not rows: raise SystemExit("огляд порожній")
@@ -122,35 +158,51 @@ def do_enrich(sh):
         for i,h in enumerate(head):
             if keyf(h)==keyf(name): return i
         return d
-    c_art, c_take, c_stat = ci("Артикул",1), ci("Взяти",6), ci("Статус",7)
+    c_art, c_take, c_stat = ci("Артикул",1), ci("Взяти"), ci("Статус")
+
+    export = find_ws(sh, "Export Products Sheet"); ex_vals = export.get_all_values()
+    ex_head = ex_vals[0]
+    ex_codes = {keyf(r[0]) for r in ex_vals[1:] if r and r[0]}         # що вже в каталозі (ідемпотентність)
+
     selected = []
     for rn, r in enumerate(rows[1:], start=2):
-        if len(r) <= c_take: continue
+        if c_take is None or len(r) <= c_take: continue
         art = r[c_art].strip() if len(r)>c_art else ""
-        done = keyf(r[c_stat] if len(r)>c_stat else "").startswith("додан")
-        if keyf(r[c_take]) in TRUE and not done and art: selected.append((rn, art))
+        if keyf(r[c_take]) in TRUE and art: selected.append((rn, art))
     if MAX: selected = selected[:MAX]
     print(f"[add] відмічено «Взяти»: {len(selected)}")
     if not selected:
         print("[add] нема відмічених — постав галки «Взяти»"); return
 
-    export = find_ws(sh, "Export Products Sheet"); ex_head = export.get_all_values()[0]
-    bm = BMParts(); new_rows, done_rn = [], []
+    bm = BMParts(); stock = fetch_stock(bm)
+    new_rows = []; mark = {}; seen = set()
     for rn, art in selected:
+        k = keyf(art)
+        if k in ex_codes or k in seen:                                # вже в Export / у пакеті → НЕ дублюємо
+            mark[rn] = "вже в Export"; print(f"[add] {art}: вже в Export — пропуск"); continue
         try:
             prod = bm.get_product(art)
-            if not prod: print(f"[add] {art}: не знайдено в BM Parts"); continue
+            if not prod: mark[rn] = "нема в BM Parts"; print(f"[add] {art}: не знайдено в BM Parts"); continue
             prod.setdefault("article", art)
-            f, name_ua, imgs, details, price = build_fields(prod)          # ПРАВИЛА_PROM
-            new_rows.append([f.get(h, "") for h in ex_head]); done_rn.append(rn)
-            print(f"[add] ✅ {art} | {name_ua[:40]} | опис {len(f.get('Опис_укр',''))}c | тегів {f.get('Пошукові_запити_укр','').count(',')+1} | фото {len(imgs)} | ціна {price}")
+            f, name_ua, imgs, details, price = build_fields(prod)      # ПРАВИЛА_PROM
+            av, qt = stock.get(k, ("", ""))                           # наявність + кількість із фіду
+            if av: f["Наявність"] = av
+            if qt != "": f["Кількість"] = qt
+            new_rows.append(_row_from_fields(ex_head, f, details)); seen.add(k); mark[rn] = "додано"
+            print(f"[add] ✅ {art} | {name_ua[:40]} | ціна {price} | наяв {f.get('Наявність','')} к-ть {f.get('Кількість','')} | х-к {len(details)} | фото {len(imgs)}")
         except Exception as e:
-            print(f"[add] {art}: ПОМИЛКА {e}")
-    if not new_rows: print("[add] нічого не зібрано"); return
-    dest = export if TARGET=="export" else find_ws(sh, "Staging_Prom")
-    dest.append_rows(new_rows, value_input_option="RAW")
-    print(f"[add] ✅ дописано {len(new_rows)} ЯКІСНИХ карток (ПРАВИЛА_PROM) у «{dest.title}»")
-    for rn in done_rn: rv.update_cell(rn, c_stat+1, "додано")
+            mark[rn] = "помилка"; print(f"[add] {art}: ПОМИЛКА {e}")
+
+    if new_rows:
+        dest = export if TARGET=="export" else find_ws(sh, "Staging_Prom")
+        dest.append_rows(new_rows, value_input_option="RAW")
+        print(f"[add] ✅ дописано {len(new_rows)} ЯКІСНИХ карток (ПРАВИЛА_PROM) у «{dest.title}»")
+    else:
+        print("[add] нових карток нема (усе вже в Export або без даних BM Parts)")
+
+    if mark and c_stat is not None:                                   # статуси одним пакетом
+        rv.batch_update([{"range": gspread.utils.rowcol_to_a1(rn, c_stat+1), "values": [[st]]}
+                         for rn, st in mark.items()], value_input_option="RAW")
 
 def main():
     sh = gc_open()
