@@ -3,7 +3,7 @@
 """enrich_add.py — збирач Prom-картки з фактів BM Parts за ПРАВИЛА_PROM (§12 алгоритм).
 Детермінований двигун: назва, категорія(nodes→група), OEM+кроси, характеристики(+вага),
 30+ ключовиків ua/ru, опис-шаблон, мета з підписом, GTIN, ціна за тарифом.
-AI-шар (GitHub Models) підключається лише коли даних мало і є токен GH_MODELS_TOKEN."""
+AI-шар підключається лише коли даних мало: Anthropic Opus (ANTHROPIC_API_KEY) або GitHub Models (GH_MODELS_TOKEN)."""
 import os, json, math, html, re, datetime
 
 ID_HUB = "1pesHiOHDq2Y4FYQECakfhIJlq08bg5_Pkm9e2YEDoic"
@@ -112,7 +112,7 @@ GROUPS = [
     (("тюнінг",),                    "149239265","Кузовые элементы тюнинга"),
 ]
 def map_group(product):
-    """Повертає (Номер_групи, Назва_групи) або ('','') якщо тип невпізнаний (→ курація власником, ПРАВИЛА §7)."""
+    """(Номер_групи, Назва_групи) або ('','') якщо тип невпізнаний (→ курація власником, ПРАВИЛА §7)."""
     hay = ((product.get("nodes") or "") + " " + (product.get("name") or "")).lower()
     for kws, gid, gname in GROUPS:
         if all(k in hay for k in kws):
@@ -273,7 +273,7 @@ def gtin_from(product):
         if len(d) in (8,12,13,14): return d
     return ""
 
-# ---------- AI-шар (GitHub Models) — вмикається лише коли є токен і даних мало ----------
+# ---------- AI-шар — вмикається лише коли даних мало ----------
 PROM_AI_SYSTEM=("Ти професійний копірайтер маркетплейсу Prom.ua, спеціалізація автозапчастини. "
  "Отримуєш факти товару з BM Parts (назва, OEM, аналоги, характеристики, сумісність, категорія). "
  "Поверни СТРОГО JSON з ключами: name_ru,name_ua (<=110 символів, без дефіса, без CAPS/емодзі, формат "
@@ -283,14 +283,40 @@ PROM_AI_SYSTEM=("Ти професійний копірайтер маркетп
  "meta_title_ru,meta_title_ua,meta_desc_ru,meta_desc_ua. Використовуй ЛИШЕ надані факти, не вигадуй специфікацій.")
 
 def _is_hard(product):
-    """Дані «бідні» → варто підсилити AI: сумісність лише марка АБО нема характеристик/аналогів."""
+    """Дані «бідні» → варто підсилити AI: сумісність лише марка АБО нема характеристик."""
     fit=_fitment(product, product.get("name") or "")
     thin_fit = (not fit) or all(len(f.split())<=1 for f in fit)
     return thin_fit or not clean_details(product)
 
-def ai_enrich(product):
+def _ai_call(system, user_json):
+    """Текст відповіді AI. Провайдер — за НАЗВОЮ моделі: claude-* -> Anthropic (платно); інакше -> GitHub Models (безкоштовно)."""
+    import urllib.request
+    model=(os.environ.get("AI_MODEL","").strip() or "openai/gpt-4.1")
+    ant=os.environ.get("ANTHROPIC_API_KEY")
     tok=os.environ.get("GH_MODELS_TOKEN") or os.environ.get("AI_TOKEN")
-    if not tok: return None
+    def _anthropic(m):
+        body=json.dumps({"model":m,"max_tokens":2000,"system":system,
+            "messages":[{"role":"user","content":user_json}]}).encode("utf-8")
+        req=urllib.request.Request("https://api.anthropic.com/v1/messages", data=body,
+            headers={"x-api-key":ant,"anthropic-version":"2023-06-01","content-type":"application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            d=json.loads(r.read().decode("utf-8"))
+        return "".join(b.get("text","") for b in d.get("content",[]) if b.get("type")=="text")
+    def _github(m):
+        url=os.environ.get("AI_API_URL","https://models.github.ai/inference/chat/completions")
+        body=json.dumps({"model":m,"temperature":0.3,
+            "messages":[{"role":"system","content":system},{"role":"user","content":user_json}]}).encode("utf-8")
+        req=urllib.request.Request(url, data=body,
+            headers={"Authorization":"Bearer "+tok,"Content-Type":"application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.loads(r.read().decode("utf-8"))["choices"][0]["message"]["content"]
+    is_claude=model.lower().startswith("claude")
+    if is_claude and ant: return _anthropic(model)         # явно Opus/Sonnet + ключ -> Anthropic
+    if tok:               return _github(model if not is_claude else "openai/gpt-4.1")  # БЕЗКОШТОВНО
+    if ant:               return _anthropic(model if is_claude else "claude-opus-4-8")  # запас
+    return None
+
+def ai_enrich(product):
     from bmparts import oem_and_replacements
     oem, repl=oem_and_replacements(product)
     facts={"article":product.get("article"),"brand":product.get("brand"),"name":product.get("name"),
@@ -298,21 +324,12 @@ def ai_enrich(product):
            "details":[{"name":n,"unit":u,"value":v} for (n,u,v) in clean_details(product)],
            "fitment":_fitment(product, product.get("name") or "")}
     try:
-        import urllib.request
-        body=json.dumps({"model":os.environ.get("AI_MODEL","gpt-4o-mini"),
-            "messages":[{"role":"system","content":PROM_AI_SYSTEM},
-                        {"role":"user","content":json.dumps(facts, ensure_ascii=False)}],
-            "temperature":0.3}).encode("utf-8")
-        _url=os.environ.get("AI_API_URL","https://models.inference.ai.azure.com/chat/completions")
-        req=urllib.request.Request(_url,
-            data=body, headers={"Authorization":"Bearer "+tok,"Content-Type":"application/json"})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            data=json.loads(r.read().decode("utf-8"))
-        txt=data["choices"][0]["message"]["content"]
+        txt=_ai_call(PROM_AI_SYSTEM, json.dumps(facts, ensure_ascii=False))
+        if not txt: return None
         mt=re.search(r"\{.*\}", txt, re.S)
         return json.loads(mt.group(0)) if mt else None
     except Exception as e:
-        print(f"[ai] пропуск ({str(e)[:90]})"); return None
+        print(f"[ai] пропуск ({str(e)[:100]})"); return None
 
 def _merge_ai(f, ai):
     def g(*ks):
@@ -357,7 +374,6 @@ def build_fields(product):
     if w: f["Вага,кг"]=str(w).replace(",",".")
     gt=gtin_from(product)
     if gt: f["Код_маркування_(GTIN)"]=gt
-    # AI-підсилення лише коли даних мало і є токен (без токена — no-op, лишається детермінований результат)
     if _is_hard(product):
         ai=ai_enrich(product)
         if ai: _merge_ai(f, ai)
@@ -381,7 +397,6 @@ def supplier_articles(gc, supplier):
     return out
 
 if __name__=="__main__":
-    # швидкий локальний тест-дамп однієї картки (без мережі, з переданого json-файлу)
     import sys
     if len(sys.argv)>1:
         prod=json.load(open(sys.argv[1], encoding="utf-8"))
