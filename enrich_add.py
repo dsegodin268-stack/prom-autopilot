@@ -374,9 +374,8 @@ def build_fields(product):
     if w: f["Вага,кг"]=str(w).replace(",",".")
     gt=gtin_from(product)
     if gt: f["Код_маркування_(GTIN)"]=gt
-    if _is_hard(product):
-        ai=ai_enrich(product)
-        if ai: _merge_ai(f, ai)
+    ai=ai_enrich(product)          # AI на КОЖНІЙ позиції; без ключа/при ліміті/помилці -> None -> лишається детермінований результат
+    if ai: _merge_ai(f, ai)
     return f, name_ua, imgs, details, price
 
 def supplier_articles(gc, supplier):
