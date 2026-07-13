@@ -1,0 +1,39 @@
+name: add
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "review = список кандидатів на огляд; enrich = збагатити відмічені «Взяти»"
+        required: true
+        default: "review"
+        type: choice
+        options: ["review", "enrich"]
+      brand:
+        description: "Бренд (для review): BMW, PORSCHE, VAG..."
+        required: false
+        default: "BMW"
+      target:
+        description: "Куди писати (для enrich): export | staging"
+        required: false
+        default: "export"
+      max:
+        description: "Ліміт (0 = всі)"
+        required: false
+        default: "0"
+jobs:
+  add:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -r requirements.txt
+      - name: Add positions (review / enrich)
+        env:
+          GCP_SA_KEY:    ${{ secrets.GCP_SA_KEY }}
+          BMPARTS_TOKEN: ${{ secrets.BMPARTS }}
+          MODE:          ${{ github.event.inputs.mode }}
+          BRAND:         ${{ github.event.inputs.brand }}
+          TARGET:        ${{ github.event.inputs.target }}
+          MAX:           ${{ github.event.inputs.max }}
+        run: python add_positions.py
