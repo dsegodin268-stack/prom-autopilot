@@ -12,19 +12,19 @@ ID_BMW="1KXaDLqBsOAtX0MxUoX39jpia9boISxl1xUxPihhU77I"
 ID_PORSCHE="1oVSVg1cBxGj-DA66c5_FoAtp6zOthdnF_xTY_ugez2g"
 ID_HUB="1pesHiOHDq2Y4FYQECakfhIJlq08bg5_Pkm9e2YEDoic"
 AUTONOVA_FROM="1c@autonovad.ua"
-EXPORT_TAB="Export Products Sheet"        # ЄДИНЕ джерело каталогу і місце публікації (Prom тягне звідси)
+EXPORT_TAB="Export Products Sheet" # ЄДИНЕ джерело каталогу і місце публікації (Prom тягне звідси)
 # колонки формату експорту Prom (0-based)
 C_CODE=0; C_NAME=1; C_PRICE=8; C_AVAIL=15; C_QTY=16
 MARGIN_FLOOR=1.16
-LIVE=os.environ.get("LIVE")=="1"          # LIVE=1 -> реально писати в Export; інакше DRY-RUN
+LIVE=os.environ.get("LIVE")=="1" # LIVE=1 -> реально писати в Export; інакше DRY-RUN
 
 def num(x):
     try: return float(str(x).replace(",",".").replace("\xa0","").replace(" ",""))
     except: return 0.0
 # --- Захисні параметри ціноутворення (env-налаштовувані, щоб не лізти в код) ---
-MIN_MARKUP_ABS=num(os.environ.get("MIN_MARKUP_ABS") or 150)      # мін. абсолютна націнка (грн) для дешевих позицій
-MAX_DROP_PCT=num(os.environ.get("MAX_DROP_PCT") or 25)/100.0     # зниження діючої ціни > цього % без конкурента -> УТРИМАТИ (не писати)
-ANCHOR_FLOOR=num(os.environ.get("ANCHOR_FLOOR") or 60)/100.0     # не писати ціну нижче цього % від якоря 30.06 без конкурента -> УТРИМАТИ
+MIN_MARKUP_ABS=num(os.environ.get("MIN_MARKUP_ABS") or 150) # мін. абсолютна націнка (грн) для дешевих позицій
+MAX_DROP_PCT=num(os.environ.get("MAX_DROP_PCT") or 25)/100.0 # зниження діючої ціни > цього % без конкурента -> УТРИМАТИ (не писати)
+ANCHOR_FLOOR=num(os.environ.get("ANCHOR_FLOOR") or 60)/100.0 # не писати ціну нижче цього % від якоря 30.06 без конкурента -> УТРИМАТИ
 def load_anchor(path=None):
     """Якір реальних цін до поломки (export 30.06): article(UPPER)->price. CSV: article,anchor_price."""
     path=path or os.environ.get("ANCHOR_CSV") or "anchor_prices.csv"; m={}
@@ -46,7 +46,7 @@ def final_price(cost):
     c=num(cost)
     if c<=0: return 0
     k=1.5 if c<3000 else 1.45 if c<5000 else 1.3 if c<10000 else 1.2 if c<30000 else 1.1
-    return int(math.ceil(max(c*k, c+MIN_MARKUP_ABS)))   # +абсолютний мінімум націнки для дешевих
+    return int(math.ceil(max(c*k, c+MIN_MARKUP_ABS))) # +абсолютний мінімум націнки для дешевих
 def price_with_competitor(cost, comp):
     base=final_price(cost)
     if not comp or comp<=0: return base
@@ -55,7 +55,7 @@ def price_with_competitor(cost, comp):
 def keep_best(best, art, item, instock):
     k=str(art).strip().upper()
     if not k: return
-    if item.get("presence")=="available" and num(item.get("qty"))>0:   # пріоритет "в наявності"
+    if item.get("presence")=="available" and num(item.get("qty"))>0: # пріоритет "в наявності"
         instock[k]=max(instock.get(k,0), int(num(item.get("qty"))))
     if k not in best or item["cost"]<best[k]["cost"]:
         item["article"]=k; best[k]=item
@@ -137,7 +137,7 @@ def pull_autonova_drive(folder_id, best, instock):
     """Читає найсвіжіший прайс Autonova з Drive-теки (її наповнює Apps Script)
     через сервіс-акаунт. Без IMAP/пароля. Підтримує zip-архів і xlsx."""
     folder_id=(folder_id or "").strip()
-    if "/folders/" in folder_id:                  # приймаємо і повний URL теки, не лише ID
+    if "/folders/" in folder_id: # приймаємо і повний URL теки, не лише ID
         folder_id=folder_id.split("/folders/")[1].split("?")[0].split("#")[0].split("/")[0]
     key=os.environ.get("GCP_SA_KEY")
     if not key: print("[autonova] нема GCP_SA_KEY — пропуск Drive"); return
@@ -146,16 +146,16 @@ def pull_autonova_drive(folder_id, best, instock):
         from google.oauth2.service_account import Credentials
         from googleapiclient.discovery import build
         creds=Credentials.from_service_account_info(json.loads(key),
-              scopes=["https://www.googleapis.com/auth/drive.readonly"])
+            scopes=["https://www.googleapis.com/auth/drive.readonly"])
         svc=build("drive","v3",credentials=creds,cache_discovery=False)
         q="'%s' in parents and trashed=false and name contains 'autonova_latest'"%folder_id
         files=svc.files().list(q=q,fields="files(id,name,modifiedTime,size)",
-              orderBy="modifiedTime desc",pageSize=5,
-              supportsAllDrives=True,includeItemsFromAllDrives=True).execute().get("files",[])
+            orderBy="modifiedTime desc",pageSize=5,
+            supportsAllDrives=True,includeItemsFromAllDrives=True).execute().get("files",[])
         if not files: print("[autonova] у Drive-теці файлів нема"); return
         fn=files[0]["name"].lower()
         data=svc.files().get_media(fileId=files[0]["id"]).execute()
-        if fn.endswith(".zip"):                       # прайс приходить архівом → розпакувати
+        if fn.endswith(".zip"): # прайс приходить архівом → розпакувати
             import zipfile
             zf=zipfile.ZipFile(io.BytesIO(data))
             inner=[m for m in zf.namelist() if m.lower().endswith((".xlsx",".xls"))]
@@ -175,7 +175,7 @@ def pull_autonova_drive(folder_id, best, instock):
             qty=sum(num(r[c]) for c in range(5,23) if c<len(r))
             if qty<=0: continue
             keep_best(best,r[2],{"name":str(r[1] or ""),"cost":cost,"qty":qty,
-                     "presence":"available","brand":"Авто"}, instock); n+=1
+                "presence":"available","brand":"Авто"}, instock); n+=1
         print(f"[autonova] Drive '{files[0]['name']}': {n} поз.")
     except Exception as e:
         print(f"[autonova] Drive {str(e)[:140]}")
@@ -190,12 +190,85 @@ def load_map(gc, tab):
     except Exception as e: print(f"[{tab}] {str(e)[:50]}")
     return m
 
+# ================== BM Parts (BMW-постачальник) — bulk-прайс ==================
+def _bmparts_price_map(brands):
+    """Один bulk-запит на бренд: /prices/prom/{brand} -> CSV у форматі імпорту Prom.
+    Повертає {article(UPPER): {'price':float,'qty':int,'presence':'available'|'order'}}.
+    price = собівартість (закупівельна ціна постачальника, підтверджено)."""
+    token=os.environ.get("BMPARTS_TOKEN")
+    if not token: print("[bmparts] нема BMPARTS_TOKEN — пропуск"); return {}
+    import csv as _csv
+    try:
+        from bmparts import BMParts
+    except Exception as e:
+        print(f"[bmparts] import bmparts не вдався: {str(e)[:90]}"); return {}
+    try:
+        bm=BMParts(token)
+        whs=[w.get("uuid") for w in bm.warehouses() if w.get("uuid")]
+    except Exception as e:
+        print(f"[bmparts] warehouses FAIL: {str(e)[:100]}"); return {}
+    out={}
+    for brand in brands:
+        try:
+            text=bm.prom_price_csv(brand, whs)
+        except Exception as e:
+            print(f"[bmparts] price CSV {brand} FAIL: {str(e)[:100]}"); continue
+        sample=text[:2000]; delim=";" if sample.count(";")>=sample.count(",") else ","
+        rows=list(_csv.reader(io.StringIO(text), delimiter=delim))
+        if len(rows)<2: print(f"[bmparts] {brand}: порожній CSV"); continue
+        head=[h.strip().lower() for h in rows[0]]
+        def col(*keys):
+            for i,h in enumerate(head):
+                if any(k in h for k in keys): return i
+            return -1
+        ci=col("код_товару","код товару","артикул","article","ідентифікатор")
+        cp=col("ціна","price"); cav=col("наявн","availab","presence"); cq=col("кільк","quantity","qty","залиш","остат")
+        hn=lambda i: head[i] if i>=0 else "-"
+        print(f"[bmparts] {brand}: колонки code={ci}({hn(ci)}) price={cp}({hn(cp)}) avail={cav}({hn(cav)}) qty={cq}({hn(cq)}); рядків={len(rows)-1}")
+        for r in rows[1:4]: print("[bmparts] зразок:", " | ".join(str(x)[:22] for x in r[:9]))
+        if ci<0 or cp<0: print(f"[bmparts] {brand}: не знайдено колонок код/ціна — пропуск"); continue
+        n=0
+        for r in rows[1:]:
+            if ci>=len(r) or cp>=len(r): continue
+            art=str(r[ci]).strip().upper(); price=num(r[cp])
+            if not art or price<=0: continue
+            qty=num(r[cq]) if 0<=cq<len(r) else 0
+            av=(r[cav].strip().lower() if 0<=cav<len(r) else "")
+            available=("наявн" in av or av in ("+","true","1","в наявності","у наявності")) or qty>0
+            out[art]={"price":price,"qty":int(qty),"presence":"available" if available else "order"}
+            n+=1
+        print(f"[bmparts] {brand}: розібрано {n} артикулів")
+    return out
+
+def pull_bmparts(codes, best, instock, brands=None):
+    """BM Parts як джерело собівартості/наявності для кодів БЕЗ постачальника.
+    Дефіс = пара: собівартість = сума, наявна лише якщо обидві половини є, к-сть = min."""
+    brands=brands or [b.strip() for b in (os.environ.get("BMPARTS_BRANDS") or "BMW").split(",") if b.strip()]
+    pm=_bmparts_price_map(brands)
+    if not pm: print("[bmparts] мапа порожня — нічого не додано"); return
+    n_ok=n_pair=n_avail=0
+    for code in codes:
+        parts=[p.strip().upper() for p in str(code).split("-") if p.strip()]
+        if not parts: continue
+        rec=[pm.get(p) for p in parts]
+        if any(x is None for x in rec): continue
+        cost=sum(x["price"] for x in rec)
+        available=all(x["presence"]=="available" for x in rec)
+        qty=min(int(x["qty"]) for x in rec) if available else 0
+        keep_best(best, str(code).strip().upper(),
+            {"name":"","cost":cost,"qty":qty,
+             "presence":"available" if available else "order","brand":"BM Parts"}, instock)
+        n_ok+=1
+        if len(parts)>1: n_pair+=1
+        if available: n_avail+=1
+    print(f"[bmparts] додано {n_ok} кодів (пар: {n_pair}, у наявності: {n_avail})")
+
 def read_export(gc):
     """Каталог Prom із вкладки «Export Products Sheet» (те, що тягне Prom).
     Повертає (ws, vals[2D, з паддінгом], idx: код(UPPER)->індекс рядка)."""
     ss=gc.open_by_key(ID_HUB)
     import re as _re
-    keyf=lambda s:_re.sub(r"[^a-z0-9]","",str(s).lower())   # лишити тільки літери/цифри: стійко до пробілів/nbsp/невидимих символів/пунктуації
+    keyf=lambda s:_re.sub(r"[^a-z0-9]","",str(s).lower()) # лишити тільки літери/цифри: стійко до пробілів/nbsp/невидимих символів/пунктуації
     want=keyf(EXPORT_TAB)
     ws=None
     for w in ss.worksheets():
@@ -207,11 +280,11 @@ def read_export(gc):
     print(f"[export] вкладка знайдена: «{ws.title}»")
     vals=ws.get_all_values()
     width=max(C_QTY+1, max((len(r) for r in vals), default=0))
-    for r in vals:                                     # вирівняти ширину, щоб безпечно писати по індексах
+    for r in vals: # вирівняти ширину, щоб безпечно писати по індексах
         if len(r)<width: r.extend([""]*(width-len(r)))
     idx={}
     for i,r in enumerate(vals):
-        if i==0: continue                              # заголовок
+        if i==0: continue # заголовок
         code=str(r[C_CODE]).strip().upper()
         if code: idx[code]=i
     return ws, vals, idx
@@ -234,13 +307,13 @@ def write_report(gc, catalog, best, instock, overrides, comps, guard_status=None
             pres="в наявності" if aq>0 else "під замовлення"
             qty=aq if aq>0 else ""
             rows.append([art, info.get("name",""), newp, chg, pres, qty,
-                         b.get("brand",""), b.get("cost",""), guard_status.get(art,"оновлено")])
+                b.get("brand",""), b.get("cost",""), guard_status.get(art,"оновлено")])
         else:
             rows.append([art, info.get("name",""), "", "", "", "", "", "", "НЕМА ПОСТАЧАЛЬНИКА"])
     ss=gc.open_by_key(ID_HUB)
-    RTAB="Звіт_Ціни"                                    # окрема вкладка звіту цін (не плутати з карткою «Звіт»)
+    RTAB="Звіт_Ціни" # окрема вкладка звіту цін (не плутати з карткою «Звіт»)
     ws=None
-    for w in ss.worksheets():                           # знайти наявну БЕЗ огляду на регістр (фікс «already exists»)
+    for w in ss.worksheets(): # знайти наявну БЕЗ огляду на регістр (фікс «already exists»)
         if w.title.strip().casefold()==RTAB.casefold(): ws=w; break
     if ws is None:
         ws=ss.add_worksheet(title=RTAB, rows=max(len(rows)+5,100), cols=len(head))
@@ -257,13 +330,18 @@ def main():
     read_all_tabs(gc,ID_BMW,"BMW",best,instock)
     read_all_tabs(gc,ID_PORSCHE,"Porsche",best,instock,force="available")
     folder=os.environ.get("AUTONOVA_FOLDER_ID")
-    if folder: pull_autonova_drive(folder,best,instock)   # шлях Drive (без пароля)
-    else: pull_autonova(best,instock)                     # запасний шлях: пошта IMAP
+    if folder: pull_autonova_drive(folder,best,instock) # шлях Drive (без пароля)
+    else: pull_autonova(best,instock) # запасний шлях: пошта IMAP
     print(f"[supply] собівартість зібрано: {len(best)} артикулів, у наявності {len(instock)}")
     overrides=load_map(gc,"overrides"); comps=load_map(gc,"competitors")
 
-    ws, vals, idx = read_export(gc)                       # каталог = та вкладка, яку тягне Prom
+    ws, vals, idx = read_export(gc) # каталог = та вкладка, яку тягне Prom
     print(f"[export] каталог «{EXPORT_TAB}»: {len(idx)} кодів")
+
+    _miss=[c for c in idx if c not in best]
+    if _miss:
+        pull_bmparts(_miss, best, instock)
+        print(f"[supply+] BM Parts-добір: собівартість тепер {len(best)} артикулів (заповнено {sum(1 for c in _miss if c in best)} з {len(_miss)} без постачальника)")
 
     only=os.environ.get("LIVE_ONLY")
     keep=set(a.strip().upper() for a in only.split(",") if a.strip()) if only else None
@@ -272,23 +350,23 @@ def main():
         row=vals[i]; cur=num(row[C_PRICE])
         catalog[code]={"name":row[C_NAME],"price":row[C_PRICE]}
         it=best.get(code)
-        if not it: continue                              # нема постачальника — рядок НЕ чіпаємо взагалі
-        if keep and code not in keep: continue           # канарка LIVE_ONLY (якщо задано)
+        if not it: continue # нема постачальника — рядок НЕ чіпаємо взагалі
+        if keep and code not in keep: continue # канарка LIVE_ONLY (якщо задано)
         matched+=1
         comp=comps.get(code)
-        newp=overrides.get(code) or price_with_competitor(it["cost"], comp)   # ціна = собівартість × тариф (або конкурент/ручна). БЕЗ утримання — застосовуємо завжди.
-        aq=instock.get(code,0)                            # наявність(+/дні) + кількість
+        newp=overrides.get(code) or price_with_competitor(it["cost"], comp) # ціна = собівартість × тариф (або конкурент/ручна). БЕЗ утримання — застосовуємо завжди.
+        aq=instock.get(code,0) # наявність(+/дні) + кількість
         if aq>0: row[C_AVAIL]="+"; row[C_QTY]=int(aq)
-        else:    row[C_AVAIL]="15"; row[C_QTY]=""         # під замовлення 15 днів, кількість порожня
+        else: row[C_AVAIL]="15"; row[C_QTY]="" # під замовлення 15 днів, кількість порожня
         rn=i+1
         row[C_PRICE]=int(newp); final_price_map[code]=int(newp); guard_status[code]="оновлено"
-        updates.append({"range":f"I{rn}","values":[[int(newp)]]})              # Ціна(I) — точково цей рядок
-        updates.append({"range":f"P{rn}:Q{rn}","values":[[row[C_AVAIL], row[C_QTY]]]})  # Наявність(P)+Кількість(Q)
+        updates.append({"range":f"I{rn}","values":[[int(newp)]]}) # Ціна(I) — точково цей рядок
+        updates.append({"range":f"P{rn}:Q{rn}","values":[[row[C_AVAIL], row[C_QTY]]]}) # Наявність(P)+Кількість(Q)
     price_upd=sum(1 for u in updates if u["range"].startswith("I"))
     print(f"[calc] зіставлено {matched}, ціну оновлено {price_upd} (усі застосовано, без утримання)")
 
     if LIVE and updates:
-        B=2000                                            # чанки, щоб не перевищити ліміт запиту
+        B=2000 # чанки, щоб не перевищити ліміт запиту
         for j in range(0,len(updates),B):
             ws.batch_update(updates[j:j+B], value_input_option="RAW")
         print(f"[export] ЗАПИСАНО в «{EXPORT_TAB}»: ціна {price_upd} + наявність/кількість {matched} рядків (ТІЛЬКИ змінені; утримані та без постачальника не чіпав). Prom підтягне фідом.")
@@ -297,12 +375,12 @@ def main():
         shown=0
         for code,i in idx.items():
             if code in final_price_map and str(final_price_map[code])!="" and shown<8:
-                print(f"   {code}: ціна={vals[i][C_PRICE]} наяв={vals[i][C_AVAIL]} к-ть={vals[i][C_QTY]}"); shown+=1
+                print(f"  {code}: ціна={vals[i][C_PRICE]} наяв={vals[i][C_AVAIL]} к-ть={vals[i][C_QTY]}"); shown+=1
 
     try: write_report(gc, catalog, best, instock, overrides, comps, guard_status, final_price_map)
     except Exception as e: print("[report]", str(e)[:140])
     if held:
         print("[guard] УТРИМАНІ (сильне зниження без конкурента, ціну НЕ чіпав; перші 30):")
-        for a,c,nw in held[:30]: print(f"[guard]   {a}: {c:.0f} -> {nw:.0f}")
+        for a,c,nw in held[:30]: print(f"[guard] {a}: {c:.0f} -> {nw:.0f}")
 
 if __name__=="__main__": main()
