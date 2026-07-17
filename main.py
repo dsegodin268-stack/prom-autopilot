@@ -6,12 +6,16 @@
 (її тягне Prom за URL-фідом). Пише три поля: Ціна(8), Наявність(15), Кількість(16).
 Захист: MIN_MARKUP_ABS, MAX_DROP_PCT, ANCHOR_FLOOR (якір 30.06).
 Реальний запис у таблицю лише при LIVE=1 (інакше DRY-RUN: рахує + звіт, не пише)."""
-import os, json, io, math, imaplib, email, datetime
+import os, json, io, math, imaplib, email, datetime, time, urllib.request, urllib.error
 
 ID_BMW="1KXaDLqBsOAtX0MxUoX39jpia9boISxl1xUxPihhU77I"
 ID_PORSCHE="1oVSVg1cBxGj-DA66c5_FoAtp6zOthdnF_xTY_ugez2g"
 ID_HUB="1pesHiOHDq2Y4FYQECakfhIJlq08bg5_Pkm9e2YEDoic"
 AUTONOVA_FROM="1c@autonovad.ua"
+# --- AutoNova-WEB (catalogue-api; дилерська ціна лише під кукі) ---
+AUTONOVA_API="https://catalogue-api.autonovad.ua/api/products"
+AUTONOVA_DEFAULT_BRAND=int(os.environ.get("AUTONOVA_BRAND_ID") or 72) # BMW=72 (нерозпізнані вважаємо BMW)
+AUTONOVA_REF=("A1678992200", 56, 6000) # (код, brandId, поріг грн) — реф. для перевірки дилерської ціни
 EXPORT_TAB="Export Products Sheet" # ЄДИНЕ джерело каталогу і місце публікації (Prom тягне звідси)
 # колонки формату експорту Prom (0-based)
 C_CODE=0; C_NAME=1; C_PRICE=8; C_AVAIL=15; C_QTY=16
@@ -190,9 +194,9 @@ def load_map(gc, tab):
     except Exception as e: print(f"[{tab}] {str(e)[:50]}")
     return m
 
-# ================== BM Parts (BMW-постачальник) — bulk-прайс ==================
+# ================== BM Parts (постачальник) — bulk-прайс по брендах ==================
 def _bmparts_price_map(brands):
-    """Один bulk-запит на бренд: /prices/prom/{brand} -> CSV у форматі імпорту Prom.
+    """Bulk-запит на кожен бренд: /prices/prom/{brand} -> CSV у форматі імпорту Prom.
     Повертає {article(UPPER): {'price':float,'qty':int,'presence':'available'|'order'}}.
     price = собівартість (закупівельна ціна постачальника, підтверджено)."""
     token=os.environ.get("BMPARTS_TOKEN")
@@ -223,9 +227,6 @@ def _bmparts_price_map(brands):
             return -1
         ci=col("код_товару","код товару","артикул","article","ідентифікатор")
         cp=col("ціна","price"); cav=col("наявн","availab","presence"); cq=col("кільк","quantity","qty","залиш","остат")
-        hn=lambda i: head[i] if i>=0 else "-"
-        print(f"[bmparts] {brand}: колонки code={ci}({hn(ci)}) price={cp}({hn(cp)}) avail={cav}({hn(cav)}) qty={cq}({hn(cq)}); рядків={len(rows)-1}")
-        for r in rows[1:4]: print("[bmparts] зразок:", " | ".join(str(x)[:22] for x in r[:9]))
         if ci<0 or cp<0: print(f"[bmparts] {brand}: не знайдено колонок код/ціна — пропуск"); continue
         n=0
         for r in rows[1:]:
@@ -262,6 +263,123 @@ def pull_bmparts(codes, best, instock, brands=None):
         if len(parts)>1: n_pair+=1
         if available: n_avail+=1
     print(f"[bmparts] додано {n_ok} кодів (пар: {n_pair}, у наявності: {n_avail})")
+
+def _nkey(s):
+    import re as _re
+    return _re.sub(r"[^0-9a-zA-Z]","",str(s)).upper() # нормалізація коду: лише цифри/літери
+
+# ================== AutoNova-WEB (джерело №2 — дилерські ціни під кукі) ==================
+def _autonova_fetch(product_id, cookie):
+    """GET .../api/products/{product_id}/extended-offers під дилерською кукі. JSON або None."""
+    url=f"{AUTONOVA_API}/{product_id}/extended-offers"
+    req=urllib.request.Request(url, headers={
+        "Cookie": cookie,
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (visimics-autopilot)",
+    })
+    for attempt in range(3): # 520 у origin буває транзієнтним
+        try:
+            with urllib.request.urlopen(req, timeout=25) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code in (502,503,520,522,524) and attempt<2: time.sleep(1.2); continue
+            return None
+        except Exception:
+            if attempt<2: time.sleep(1.0); continue
+            return None
+    return None
+
+def _autonova_code_best(code, brand_id, cookie):
+    """Собівартість/наявність по ОДНОМУ номеру. Мінімум по ВСІХ пропозиціях
+    (bestPrice/bestDelivery у API брехливі — рахуємо самі). None якщо нема пропозицій."""
+    d=_autonova_fetch(f"{code}_{brand_id}", cookie)
+    if not d: return None
+    cand=[]
+    for grp in ("offers","supplierOffers","branchOffers","consignmentOffers"):
+        for o in (d.get(grp) or []):
+            p=num((o.get("price") or {}).get("current"))
+            if p<=0: continue
+            cand.append({
+                "price": p,
+                "qty":   num(o.get("quantity")),
+                "days":  num((o.get("delivery") or {}).get("days")),
+                "own":   (o.get("category")=="offers"), # власний склад АвтоНови
+            })
+    if not cand: return None
+    own_stock=[c for c in cand if c["own"] and c["qty"]>0 and c["days"]<=1] # є сьогодні на власному складі
+    if own_stock:
+        b=min(own_stock, key=lambda c:c["price"])
+        return {"cost":b["price"], "qty":int(b["qty"]), "presence":"available"}
+    cheapest=min(cand, key=lambda c:c["price"]) # інакше — під замовлення за найдешевшою
+    return {"cost":cheapest["price"], "qty":0, "presence":"order"}
+
+def autonova_web_authorized(cookie):
+    """Перевірка, що кукі дає ДИЛЕРСЬКУ ціну (а не гостьову). Захист від протухлої кукі:
+    краще нічого не писати, ніж записати завищену собівартість."""
+    code,bid,thr=AUTONOVA_REF
+    d=_autonova_fetch(f"{code}_{bid}", cookie)
+    if not d: print("[autonova-web] реф. запит не вдався — пропуск (кукі/мережа)"); return False
+    ref=num((d.get("bestDelivery") or {}).get("price",{}).get("current"))
+    if 0<ref<thr:
+        print(f"[autonova-web] авторизація OK (дилерська реф.ціна {ref:.0f} < {thr})"); return True
+    print(f"[autonova-web] УВАГА: кукі схоже протухла (реф.ціна {ref:.0f} ≥ {thr}, гостьова). "
+          f"НІЧОГО не пишу з web, щоб не завищити собівартість. Онови AUTONOVA_COOKIE."); return False
+
+def pull_autonova_web(codes, best, instock, cookie):
+    """Для кодів БЕЗ постачальника — тягне ціну/наявність з catalogue-api.
+    Дефіс = пара BMW-номерів: собівартість = сума, наявна лише якщо ОБИДВІ є, к-сть = min.
+    Ключ у best = точний код каталогу (з дефісом), щоб зіставитися з Export Products Sheet."""
+    if not cookie: print("[autonova-web] нема AUTONOVA_COOKIE — пропуск"); return
+    if not autonova_web_authorized(cookie): return
+    limit=int(num(os.environ.get("AUTONOVA_WEB_LIMIT") or 0)) # 0 = всі (для тесту можна обмежити)
+    brand=AUTONOVA_DEFAULT_BRAND
+    n_ok=n_pair=n_avail=0; seen=0
+    for code in codes:
+        if limit and seen>=limit: break
+        seen+=1
+        parts=[p.strip() for p in str(code).split("-") if p.strip()] # дефіс -> два номери
+        if not parts: continue
+        res=[]; ok=True
+        for part in parts:
+            r=_autonova_code_best(part, brand, cookie)
+            if not r: ok=False; break
+            res.append(r); time.sleep(0.15) # ввічливо до API
+        if not ok or not res: continue
+        cost=sum(r["cost"] for r in res) # пара = сума собівартостей
+        available=all(r["presence"]=="available" for r in res)
+        qty=min(int(r["qty"]) for r in res) if available else 0
+        keep_best(best, str(code).strip().upper(),
+            {"name":"", "cost":cost, "qty":qty,
+             "presence":"available" if available else "order", "brand":"Авто-web"}, instock)
+        n_ok+=1
+        if len(parts)>1: n_pair+=1
+        if available: n_avail+=1
+    print(f"[autonova-web] додано {n_ok} кодів (пар: {n_pair}, у наявності: {n_avail}) з {seen} перевірених")
+
+def pull_pairs_from_best(codes, best, instock):
+    """ДЖЕРЕЛО №1 для кодів без постачальника: подвоєні номери BMW (через дефіс) —
+    це пара реальних BMW-артикулів, обидва вже є в BMW-аркушах (best).
+    Собівартість = сума половин; наявність — лише якщо обидві в наявності; к-сть = min.
+    Зіставлення нормалізоване (стійке до пробілів/регістру). Без зовнішніх запитів."""
+    bnk={}
+    for k,v in best.items():
+        bnk.setdefault(_nkey(k), v) # індекс best за нормалізованим ключем
+    n_ok=n_avail=0
+    for code in codes:
+        parts=[p for p in str(code).split("-") if p.strip()]
+        if len(parts)<2: continue # тільки складені (подвоєні) номери
+        rec=[bnk.get(_nkey(p)) for p in parts]
+        if any(x is None for x in rec): continue # хоч одна половина відсутня в BMW — пропуск
+        cost=sum(num(x.get("cost")) for x in rec)
+        if cost<=0: continue
+        avail=all(x.get("presence")=="available" and num(x.get("qty"))>0 for x in rec)
+        qty=min(int(num(x.get("qty"))) for x in rec) if avail else 0
+        keep_best(best, str(code).strip().upper(),
+            {"name":rec[0].get("name",""),"cost":cost,"qty":qty,
+             "presence":"available" if avail else "order","brand":"BMW-пара"}, instock)
+        n_ok+=1
+        if avail: n_avail+=1
+    print(f"[pairs] BMW-пари з аркушів: зібрано {n_ok} (у наявності: {n_avail})")
 
 def read_export(gc):
     """Каталог Prom із вкладки «Export Products Sheet» (те, що тягне Prom).
@@ -338,10 +456,21 @@ def main():
     ws, vals, idx = read_export(gc) # каталог = та вкладка, яку тягне Prom
     print(f"[export] каталог «{EXPORT_TAB}»: {len(idx)} кодів")
 
+    # --- Добір кодів БЕЗ постачальника. ПОРЯДОК ДЖЕРЕЛ: 1) BMW-пари з аркушів 2) autonova-web 3) BM Parts ---
+    _miss=[c for c in idx if c not in best]
+    print(f"[supply+] без постачальника: {len(_miss)}; приклади: " + " | ".join(str(c) for c in _miss[:10]))
+    pull_pairs_from_best(_miss, best, instock)                 # 1) BMW-пари (подвоєні номери) з BMW-аркушів
+    _miss=[c for c in idx if c not in best]
+    cookie=os.environ.get("AUTONOVA_COOKIE")
+    if _miss and cookie:
+        pull_autonova_web(_miss, best, instock, cookie)        # 2) autonova-web (дилерські ціни)
+    elif _miss:
+        print("[autonova-web] нема AUTONOVA_COOKIE — крок 2 пропущено (додай секрет AUTONOVA_COOKIE)")
     _miss=[c for c in idx if c not in best]
     if _miss:
-        pull_bmparts(_miss, best, instock)
-        print(f"[supply+] BM Parts-добір: собівартість тепер {len(best)} артикулів (заповнено {sum(1 for c in _miss if c in best)} з {len(_miss)} без постачальника)")
+        pull_bmparts(_miss, best, instock)                     # 3) BM Parts (решта)
+    _left=[c for c in idx if c not in best]
+    print(f"[supply+] після добору: собівартість {len(best)}; лишилось без постачальника {len(_left)}")
 
     only=os.environ.get("LIVE_ONLY")
     keep=set(a.strip().upper() for a in only.split(",") if a.strip()) if only else None
