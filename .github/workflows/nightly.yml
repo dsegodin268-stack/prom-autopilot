@@ -18,6 +18,7 @@ jobs:
           MAIL_PASS: ${{ secrets.MAIL_PASS }}
           PROM_API_KEY: ${{ secrets.PROM_API_KEY }}
           AUTONOVA_FOLDER_ID: ${{ secrets.AUTONOVA_FOLDER_ID }}
+          AUTONOVA_COOKIE: ${{ secrets.AUTONOVA_COOKIE }}
           BMPARTS_TOKEN: ${{ secrets.BMPARTS }}
           BMPARTS_BRANDS: ${{ vars.BMPARTS_BRANDS }}
           LIVE: ${{ vars.LIVE }}
