@@ -249,7 +249,7 @@ def pull_bmparts(codes, best, instock, brands=None):
     if not pm: print("[bmparts] мапа порожня — нічого не додано"); return
     n_ok=n_pair=n_avail=0
     for code in codes:
-        parts=[p.strip().upper() for p in str(code).split("-") if p.strip()]
+        parts=[p.upper() for p in _expand_code(code)]
         if not parts: continue
         rec=[pm.get(p) for p in parts]
         if any(x is None for x in rec): continue
@@ -267,6 +267,18 @@ def pull_bmparts(codes, best, instock, brands=None):
 def _nkey(s):
     import re as _re
     return _re.sub(r"[^0-9a-zA-Z]","",str(s)).upper() # нормалізація коду: лише цифри/літери
+
+def _expand_code(code):
+    """Розкладає дефісний код на ПОВНІ номери. Другий+ номер може бути скороченим
+    суфіксом першого: '51117303107-108' -> ['51117303107','51117303108'];
+    '51712150246-47' -> ['51712150246','51712150247']. Якщо номер уже повний — лишається як є."""
+    raw=[p.strip() for p in str(code).split("-") if p.strip()]
+    if not raw: return []
+    base=raw[0]; out=[base]
+    for nx in raw[1:]:
+        if len(nx)<len(base): nx=base[:len(base)-len(nx)]+nx # дотягнути префіксом першого
+        out.append(nx)
+    return out
 
 # ================== AutoNova-WEB (джерело №2 — дилерські ціни під кукі) ==================
 def _autonova_fetch(product_id, cookie):
@@ -337,7 +349,7 @@ def pull_autonova_web(codes, best, instock, cookie):
     for code in codes:
         if limit and seen>=limit: break
         seen+=1
-        parts=[p.strip() for p in str(code).split("-") if p.strip()] # дефіс -> два номери
+        parts=_expand_code(code) # дефіс -> повні номери (суфікс дотягується префіксом першого)
         if not parts: continue
         res=[]; ok=True
         for part in parts:
@@ -370,15 +382,23 @@ def pull_pairs_from_best(codes, best, instock):
              "presence":"available" if av else "order","brand":brand}, instock)
     n_whole=n_pair=n_avail=0; unmatched=[]
     for code in codes:
-        # 1) ВЕСЬ код як окремий артикул у BMW-аркуші (інший роздільник/формат)
+        # 1) НОМЕР ДО ТИРЕ як окремий BMW-артикул (формат номера — частина до дефіса; «-108» це суфікс)
+        first=str(code).split("-")[0].strip()
+        f=bnk.get(_nkey(first)) if first else None
+        if f is not None and num(f.get("cost"))>0:
+            av=(f.get("presence")=="available" and num(f.get("qty"))>0)
+            _add(code, num(f.get("cost")), av, num(f.get("qty")), "BMW"); n_whole+=1
+            if av: n_avail+=1
+            continue
+        # 1б) ВЕСЬ код як окремий артикул у BMW-аркуші (інший роздільник/формат)
         w=bnk.get(_nkey(code))
         if w is not None and num(w.get("cost"))>0:
             av=(w.get("presence")=="available" and num(w.get("qty"))>0)
             _add(code, num(w.get("cost")), av, num(w.get("qty")), "BMW"); n_whole+=1
             if av: n_avail+=1
             continue
-        # 2) ПАРА половинок (сума собівартостей)
-        parts=[p for p in str(code).split("-") if p.strip()]
+        # 2) ПАРА половинок (сума собівартостей), другий номер може бути скороченим суфіксом
+        parts=_expand_code(code)
         if len(parts)>=2:
             rec=[bnk.get(_nkey(p)) for p in parts]
             if all(x is not None for x in rec):
@@ -391,8 +411,8 @@ def pull_pairs_from_best(codes, best, instock):
                     continue
         if len(unmatched)<12: unmatched.append(code)
     print(f"[pairs] BMW з аркушів: ціле={n_whole}, пари={n_pair} (у наявності: {n_avail})")
-    for code in unmatched: # діагностика: де половинки НЕ знаходяться
-        halves=[_nkey(h) for h in str(code).split("-") if h.strip()]
+    for code in unmatched: # діагностика: де половинки НЕ знаходяться (з розгортанням суфікса)
+        halves=[_nkey(h) for h in _expand_code(code)]
         print("[diag2]", code, "->", " | ".join(h+("=IN" if h in bnk else "=NO") for h in halves))
 
 def read_export(gc):
