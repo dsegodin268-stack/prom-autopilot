@@ -364,22 +364,36 @@ def pull_pairs_from_best(codes, best, instock):
     bnk={}
     for k,v in best.items():
         bnk.setdefault(_nkey(k), v) # індекс best за нормалізованим ключем
-    n_ok=n_avail=0
-    for code in codes:
-        parts=[p for p in str(code).split("-") if p.strip()]
-        if len(parts)<2: continue # тільки складені (подвоєні) номери
-        rec=[bnk.get(_nkey(p)) for p in parts]
-        if any(x is None for x in rec): continue # хоч одна половина відсутня в BMW — пропуск
-        cost=sum(num(x.get("cost")) for x in rec)
-        if cost<=0: continue
-        avail=all(x.get("presence")=="available" and num(x.get("qty"))>0 for x in rec)
-        qty=min(int(num(x.get("qty"))) for x in rec) if avail else 0
+    def _add(code, cost, av, qty, brand):
         keep_best(best, str(code).strip().upper(),
-            {"name":rec[0].get("name",""),"cost":cost,"qty":qty,
-             "presence":"available" if avail else "order","brand":"BMW-пара"}, instock)
-        n_ok+=1
-        if avail: n_avail+=1
-    print(f"[pairs] BMW-пари з аркушів: зібрано {n_ok} (у наявності: {n_avail})")
+            {"name":"","cost":cost,"qty":int(qty) if av else 0,
+             "presence":"available" if av else "order","brand":brand}, instock)
+    n_whole=n_pair=n_avail=0; unmatched=[]
+    for code in codes:
+        # 1) ВЕСЬ код як окремий артикул у BMW-аркуші (інший роздільник/формат)
+        w=bnk.get(_nkey(code))
+        if w is not None and num(w.get("cost"))>0:
+            av=(w.get("presence")=="available" and num(w.get("qty"))>0)
+            _add(code, num(w.get("cost")), av, num(w.get("qty")), "BMW"); n_whole+=1
+            if av: n_avail+=1
+            continue
+        # 2) ПАРА половинок (сума собівартостей)
+        parts=[p for p in str(code).split("-") if p.strip()]
+        if len(parts)>=2:
+            rec=[bnk.get(_nkey(p)) for p in parts]
+            if all(x is not None for x in rec):
+                cost=sum(num(x.get("cost")) for x in rec)
+                if cost>0:
+                    av=all(x.get("presence")=="available" and num(x.get("qty"))>0 for x in rec)
+                    qty=min(int(num(x.get("qty"))) for x in rec) if av else 0
+                    _add(code, cost, av, qty, "BMW-пара"); n_pair+=1
+                    if av: n_avail+=1
+                    continue
+        if len(unmatched)<12: unmatched.append(code)
+    print(f"[pairs] BMW з аркушів: ціле={n_whole}, пари={n_pair} (у наявності: {n_avail})")
+    for code in unmatched: # діагностика: де половинки НЕ знаходяться
+        halves=[_nkey(h) for h in str(code).split("-") if h.strip()]
+        print("[diag2]", code, "->", " | ".join(h+("=IN" if h in bnk else "=NO") for h in halves))
 
 def read_export(gc):
     """Каталог Prom із вкладки «Export Products Sheet» (те, що тягне Prom).
