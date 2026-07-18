@@ -614,6 +614,7 @@ def main():
     pull_pairs_from_best(_miss, best, instock)                 # 1) BMW-пари (подвоєні номери) з BMW-аркушів
     _miss=[c for c in idx if c not in best]
     cookie=os.environ.get("AUTONOVA_COOKIE")
+    if cookie: cookie=cookie.replace("\r","").replace("\n","").strip() # прибрати переноси з копіпасту (інакше urllib: Invalid header value)
     if _miss and cookie:
         pull_autonova_web(_miss, best, instock, cookie)        # 2) autonova-web (дилерські ціни)
     elif _miss:
