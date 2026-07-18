@@ -474,6 +474,28 @@ def write_report(gc, catalog, best, instock, overrides, comps, guard_status=None
     ws.update(values=rows, range_name="A1")
     print(f"[report] {RTAB}: {len(rows)-1} рядків записано")
 
+def pull_autonova_cache(best, instock, path=None):
+    """Кеш дилерських цін autonova (зібраний з веб-сесії дилера): code<TAB>cost<TAB>qty<TAB>presence.
+    Це джерело для кодів, яких немає у BMW/Porsche-аркушах (переважно Mercedes/BMW-дрібнота)."""
+    path=path or os.environ.get("AUTONOVA_CACHE") or "autonova_web_cache.csv"; n=0
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                parts=line.rstrip("\n").split("\t")
+                if len(parts)<2: continue
+                code=parts[0].strip(); cost=num(parts[1])
+                if not code or cost<=0: continue
+                qty=num(parts[2]) if len(parts)>2 else 0
+                pres=(parts[3].strip() if len(parts)>3 else "order")
+                av=(pres=="available" and qty>0)
+                keep_best(best, code, {"name":"","cost":cost,"qty":int(qty) if av else 0,
+                    "presence":"available" if av else "order","brand":"Авто-web"}, instock); n+=1
+        print(f"[autonova-cache] завантажено {n} дилерських цін із {path}")
+    except FileNotFoundError:
+        print(f"[autonova-cache] {path} нема — пропуск")
+    except Exception as e:
+        print(f"[autonova-cache] {str(e)[:100]}")
+
 def main():
     gc=gclient()
     if not gc:
@@ -485,6 +507,7 @@ def main():
     if folder: pull_autonova_drive(folder,best,instock) # шлях Drive (без пароля)
     else: pull_autonova(best,instock) # запасний шлях: пошта IMAP
     print(f"[supply] собівартість зібрано: {len(best)} артикулів, у наявності {len(instock)}")
+    pull_autonova_cache(best, instock) # дилерські ціни autonova з веб-кешу (для кодів поза BMW-аркушами)
     overrides=load_map(gc,"overrides"); comps=load_map(gc,"competitors")
 
     ws, vals, idx = read_export(gc) # каталог = та вкладка, яку тягне Prom
