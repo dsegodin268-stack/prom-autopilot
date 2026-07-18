@@ -357,7 +357,7 @@ def _autonova_diag(product_id, cookie):
     req=urllib.request.Request(url, headers={"Cookie":cookie or "",
         "Accept":"application/json","User-Agent":"Mozilla/5.0 (visimics-autopilot)"})
     try:
-        with _autonova_opener().open(req, timeout=25) as r:
+        with _autonova_opener().open(req, timeout=8) as r:
             body=r.read(200).decode("utf-8","replace")
             print(f"[autonova-diag] HTTP {getattr(r,'status',200)} OK; тіло[:100]={body[:100]!r}")
     except urllib.error.HTTPError as e:
@@ -383,7 +383,7 @@ def _autonova_fetch(product_id, cookie):
     })
     for attempt in range(3): # 520 у origin буває транзієнтним
         try:
-            with _autonova_opener().open(req, timeout=25) as r:
+            with _autonova_opener().open(req, timeout=8) as r:
                 return json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             if e.code in (502,503,520,522,524) and attempt<2: time.sleep(1.2); continue
@@ -445,24 +445,19 @@ def pull_autonova_web(codes, best, instock, cookie):
     if not cookie: print("[autonova-web] нема AUTONOVA_COOKIE — пропуск"); return
     if not autonova_web_authorized(cookie): return
     limit=int(num(os.environ.get("AUTONOVA_WEB_LIMIT") or 0)) # 0 = всі (для тесту можна обмежити)
-    try_list=[int(x) for x in (os.environ.get("AUTONOVA_BRANDS") or "56,72,59").split(",") if x.strip()] # Mercedes=56,BMW=72,Mann=59
     n_ok=n_pair=n_avail=0; seen=0
     for code in codes:
         if limit and seen>=limit: break
         seen+=1
         parts=_expand_code(code) # дефіс -> повні номери (суфікс дотягується префіксом першого)
         if not parts: continue
-        guess=_autonova_brand_for(code) # brandId за префіксом коду (A+цифри=Mercedes, суто цифри=BMW)
-        try_brands=([guess]+[b for b in try_list if b!=guess]) if guess else try_list
-        res=None
-        for bid in try_brands: # пробуємо марки, поки якась не дасть усі частини
-            acc=[]; ok=True
-            for part in parts:
-                r=_autonova_code_best(part, bid, cookie)
-                if not r: ok=False; break
-                acc.append(r); time.sleep(0.15) # ввічливо до API
-            if ok and acc: res=acc; break
-        if not res: continue
+        bid=_autonova_brand_for(code) or AUTONOVA_DEFAULT_BRAND # ТІЛЬКИ brandId за префіксом (без 3-брендового fallback — швидко)
+        res=[]; ok=True
+        for part in parts:
+            r=_autonova_code_best(part, bid, cookie)
+            if not r: ok=False; break
+            res.append(r); time.sleep(0.15) # ввічливо до API
+        if not ok or not res: continue
         cost=sum(r["cost"] for r in res) # пара = сума собівартостей
         available=all(r["presence"]=="available" for r in res)
         qty=min(int(r["qty"]) for r in res) if available else 0
