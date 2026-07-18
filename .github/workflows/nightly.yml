@@ -21,6 +21,7 @@ jobs:
           AUTONOVA_COOKIE: ${{ secrets.AUTONOVA_COOKIE }}
           BMPARTS_TOKEN: ${{ secrets.BMPARTS }}
           BMPARTS_BRANDS: ${{ vars.BMPARTS_BRANDS }}
+          BM_MIN_INTERVAL: "0.8"
           LIVE: ${{ vars.LIVE }}
           LIVE_ONLY: ${{ vars.LIVE_ONLY }}
           LIVE_LIMIT: ${{ vars.LIVE_LIMIT }}
