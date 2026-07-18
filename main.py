@@ -433,11 +433,14 @@ def autonova_web_authorized(cookie):
           f"НІЧОГО не пишу з web, щоб не завищити собівартість. Онови AUTONOVA_COOKIE."); return False
 
 def _autonova_brand_for(code):
-    """brandId за префіксом артикула: 'A'+цифри -> Mercedes(56); суто цифри -> BMW(72); інакше None."""
+    """brandId autonova за форматом артикула (перевірено на реальних кодах):
+    суто цифри -> BMW(72); 'A'+цифри -> Mercedes(56);
+    решта алфанумерик (4H,4L,8W,4M,G0,80A,3R,5GE...) -> VAG(1)."""
     c=str(code).strip().upper()
+    if not c: return None
+    if c.isdigit(): return 72
     if c[:1]=="A" and c[1:2].isdigit(): return 56
-    if c[:1].isdigit(): return 72
-    return None
+    return 1
 def pull_autonova_web(codes, best, instock, cookie):
     """Для кодів БЕЗ постачальника — тягне ціну/наявність з catalogue-api.
     Дефіс = пара BMW-номерів: собівартість = сума, наявна лише якщо ОБИДВІ є, к-сть = min.
@@ -445,19 +448,24 @@ def pull_autonova_web(codes, best, instock, cookie):
     if not cookie: print("[autonova-web] нема AUTONOVA_COOKIE — пропуск"); return
     if not autonova_web_authorized(cookie): return
     limit=int(num(os.environ.get("AUTONOVA_WEB_LIMIT") or 0)) # 0 = всі (для тесту можна обмежити)
+    ALL_BRANDS=[int(x) for x in (os.environ.get("AUTONOVA_BRANDS") or "1,72,56,59").split(",") if x.strip()] # VAG=1,BMW=72,Mercedes=56,Mann=59
     n_ok=n_pair=n_avail=0; seen=0
     for code in codes:
         if limit and seen>=limit: break
         seen+=1
         parts=_expand_code(code) # дефіс -> повні номери (суфікс дотягується префіксом першого)
         if not parts: continue
-        bid=_autonova_brand_for(code) or AUTONOVA_DEFAULT_BRAND # ТІЛЬКИ brandId за префіксом (без 3-брендового fallback — швидко)
-        res=[]; ok=True
-        for part in parts:
-            r=_autonova_code_best(part, bid, cookie)
-            if not r: ok=False; break
-            res.append(r); time.sleep(0.15) # ввічливо до API
-        if not ok or not res: continue
+        guess=_autonova_brand_for(code) # спершу пробуємо вгадану марку (VAG-код -> 1), далі решта
+        order=([guess]+[b for b in ALL_BRANDS if b!=guess]) if guess else ALL_BRANDS
+        res=None
+        for bid in order:
+            acc=[]; ok=True
+            for part in parts:
+                r=_autonova_code_best(part, bid, cookie)
+                if not r: ok=False; break
+                acc.append(r); time.sleep(0.15) # ввічливо до API
+            if ok and acc: res=acc; break
+        if not res: continue
         cost=sum(r["cost"] for r in res) # пара = сума собівартостей
         available=all(r["presence"]=="available" for r in res)
         qty=min(int(r["qty"]) for r in res) if available else 0
@@ -483,12 +491,15 @@ def pull_pairs_from_best(codes, best, instock):
              "presence":"available" if av else "order","brand":brand}, instock)
     n_whole=n_pair=n_avail=0; unmatched=[]
     for code in codes:
-        # 1) НОМЕР ДО ТИРЕ як окремий BMW-артикул (формат номера — частина до дефіса; «-108» це суфікс)
+        # 1) НОМЕР ДО ТИРЕ як окремий BMW-артикул. Якщо код — пара (є дефіс), це комплект
+        #    лівий+правий: ціна = ціна ПЕРШОГО номера ×2. Інакше (без дефіса) ×1.
         first=str(code).split("-")[0].strip()
         f=bnk.get(_nkey(first)) if first else None
         if f is not None and num(f.get("cost"))>0:
+            is_pair=("-" in str(code))
             av=(f.get("presence")=="available" and num(f.get("qty"))>0)
-            _add(code, num(f.get("cost")), av, num(f.get("qty")), "BMW"); n_whole+=1
+            _add(code, num(f.get("cost"))*(2 if is_pair else 1), av, num(f.get("qty")),
+                 "BMW-пара(×2)" if is_pair else "BMW"); n_whole+=1
             if av: n_avail+=1
             continue
         # 1б) ВЕСЬ код як окремий артикул у BMW-аркуші (інший роздільник/формат)
