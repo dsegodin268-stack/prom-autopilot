@@ -195,10 +195,11 @@ def load_map(gc, tab):
     return m
 
 # ================== BM Parts (постачальник) — bulk-прайс по брендах ==================
-def _bmparts_price_map(brands):
-    """Bulk-запит на кожен бренд: /prices/prom/{brand} -> CSV у форматі імпорту Prom.
-    Повертає {article(UPPER): {'price':float,'qty':int,'presence':'available'|'order'}}.
-    price = собівартість (закупівельна ціна постачальника, підтверджено)."""
+def _bmparts_price_map(brands=None):
+    """Прайс BM Parts у форматі Prom по КАР-БРЕНДАХ. brands=None -> УСІ авто-марки з каталогу
+    (GET /catalog/cars/brands/), або список із BMPARTS_BRANDS. Так знаходимо не лише BMW,
+    а й Mercedes/VAG/Audi/… Повертає {article(UPPER): {'price','qty','presence'}}.
+    price = собівартість (закупівельна ціна постачальника, підтверджено). Лише товари в наявності."""
     token=os.environ.get("BMPARTS_TOKEN")
     if not token: print("[bmparts] нема BMPARTS_TOKEN — пропуск"); return {}
     import csv as _csv
@@ -211,15 +212,26 @@ def _bmparts_price_map(brands):
         whs=[w.get("uuid") for w in bm.warehouses() if w.get("uuid")]
     except Exception as e:
         print(f"[bmparts] warehouses FAIL: {str(e)[:100]}"); return {}
-    out={}
+    if not brands:
+        env=os.environ.get("BMPARTS_BRANDS")
+        if env:
+            brands=[b.strip() for b in env.split(",") if b.strip()]
+        else:
+            try: # усі авто-марки з каталогу BM Parts
+                rr=bm.s.get("https://api.bm.parts/catalog/cars/brands/", timeout=60); rr.raise_for_status()
+                brands=[b.get("name") for b in (rr.json().get("car_brands") or []) if b.get("name")]
+                print(f"[bmparts] авто-марок у каталозі: {len(brands)}")
+            except Exception as e:
+                print(f"[bmparts] список авто-марок FAIL: {str(e)[:100]} — лишаю BMW"); brands=["BMW"]
+    out={}; brands_hit=0
     for brand in brands:
         try:
             text=bm.prom_price_csv(brand, whs)
-        except Exception as e:
-            print(f"[bmparts] price CSV {brand} FAIL: {str(e)[:100]}"); continue
+        except Exception:
+            continue # марка без даних/помилка — тихо далі (щоб не спамити лог на 100+ марок)
         sample=text[:2000]; delim=";" if sample.count(";")>=sample.count(",") else ","
         rows=list(_csv.reader(io.StringIO(text), delimiter=delim))
-        if len(rows)<2: print(f"[bmparts] {brand}: порожній CSV"); continue
+        if len(rows)<2: continue
         head=[h.strip().lower() for h in rows[0]]
         def col(*keys):
             for i,h in enumerate(head):
@@ -227,7 +239,7 @@ def _bmparts_price_map(brands):
             return -1
         ci=col("код_товару","код товару","артикул","article","ідентифікатор")
         cp=col("ціна","price"); cav=col("наявн","availab","presence"); cq=col("кільк","quantity","qty","залиш","остат")
-        if ci<0 or cp<0: print(f"[bmparts] {brand}: не знайдено колонок код/ціна — пропуск"); continue
+        if ci<0 or cp<0: continue
         n=0
         for r in rows[1:]:
             if ci>=len(r) or cp>=len(r): continue
@@ -236,33 +248,31 @@ def _bmparts_price_map(brands):
             qty=num(r[cq]) if 0<=cq<len(r) else 0
             av=(r[cav].strip().lower() if 0<=cav<len(r) else "")
             available=("наявн" in av or av in ("+","true","1","в наявності","у наявності")) or qty>0
-            out[art]={"price":price,"qty":int(qty),"presence":"available" if available else "order"}
+            if art not in out or price<out[art]["price"]: # лишаємо найдешевшу
+                out[art]={"price":price,"qty":int(qty),"presence":"available" if available else "order"}
             n+=1
-        print(f"[bmparts] {brand}: розібрано {n} артикулів")
+        if n: brands_hit+=1; print(f"[bmparts] {brand}: {n}")
+    print(f"[bmparts] мапа: {len(out)} унікальних артикулів по {brands_hit} марках (із {len(brands)})")
     return out
 
 def pull_bmparts(codes, best, instock, brands=None):
-    """BM Parts як джерело собівартості/наявності для кодів БЕЗ постачальника.
-    Дефіс = пара: собівартість = сума, наявна лише якщо обидві половини є, к-сть = min."""
-    brands=brands or [b.strip() for b in (os.environ.get("BMPARTS_BRANDS") or "BMW").split(",") if b.strip()]
-    pm=_bmparts_price_map(brands)
+    """BM Parts (УСІ авто-марки з каталогу) для кодів БЕЗ постачальника.
+    Ключ зіставлення = номер до тире (частина артикула до дефіса). Ціна = собівартість."""
+    import re as _re
+    pm=_bmparts_price_map(brands) # brands=None -> усі авто-марки (Mercedes/VAG/Audi/… а не лише BMW)
     if not pm: print("[bmparts] мапа порожня — нічого не додано"); return
-    n_ok=n_pair=n_avail=0
+    n_ok=n_avail=0
     for code in codes:
-        parts=[p.upper() for p in _expand_code(code)]
-        if not parts: continue
-        rec=[pm.get(p) for p in parts]
-        if any(x is None for x in rec): continue
-        cost=sum(x["price"] for x in rec)
-        available=all(x["presence"]=="available" for x in rec)
-        qty=min(int(x["qty"]) for x in rec) if available else 0
+        k=_re.split(r"[-–—]", str(code))[0].strip().upper() # номер до тире
+        rec=pm.get(k)
+        if not rec: continue
+        av=(rec["presence"]=="available" and rec["qty"]>0)
         keep_best(best, str(code).strip().upper(),
-            {"name":"","cost":cost,"qty":qty,
-             "presence":"available" if available else "order","brand":"BM Parts"}, instock)
+            {"name":"","cost":rec["price"],"qty":int(rec["qty"]) if av else 0,
+             "presence":"available" if av else "order","brand":"BM Parts"}, instock)
         n_ok+=1
-        if len(parts)>1: n_pair+=1
-        if available: n_avail+=1
-    print(f"[bmparts] додано {n_ok} кодів (пар: {n_pair}, у наявності: {n_avail})")
+        if av: n_avail+=1
+    print(f"[bmparts] додано {n_ok} кодів (у наявності: {n_avail})")
 
 def _nkey(s):
     import re as _re
