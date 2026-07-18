@@ -195,11 +195,61 @@ def load_map(gc, tab):
     return m
 
 # ================== BM Parts (постачальник) — bulk-прайс по брендах ==================
+def _bmparts_list_map():
+    """Прайс BM Parts УСІХ брендів ОДНИМ запитом (POST /prices/list, format=csv).
+    Лише товари в наявності. Повертає {article(UPPER): {'price','qty','presence'}}.
+    Це надійніше за ітерацію /prices/prom по 30 марках (без per-brand encoding/rate-limit проблем)."""
+    token=os.environ.get("BMPARTS_TOKEN")
+    if not token: return {}
+    import csv as _csv
+    try:
+        from bmparts import BMParts
+        bm=BMParts(token)
+        whs=[w.get("uuid") for w in bm.warehouses() if w.get("uuid")]
+    except Exception as e:
+        print(f"[bmparts] list init FAIL: {str(e)[:100]}"); return {}
+    try:
+        r=bm.s.post("https://api.bm.parts/prices/list",
+                    json={"warehouses":whs,"format":"csv","products_type":"code"}, timeout=180)
+        if r.status_code!=200:
+            print(f"[bmparts] /prices/list HTTP {r.status_code}"); return {}
+        text=r.text
+    except Exception as e:
+        print(f"[bmparts] /prices/list FAIL: {str(e)[:100]}"); return {}
+    sample=text[:2000]; delim=";" if sample.count(";")>=sample.count(",") else ","
+    rows=list(_csv.reader(io.StringIO(text), delimiter=delim))
+    if len(rows)<2: print("[bmparts] /prices/list порожній"); return {}
+    head=[h.strip().lower() for h in rows[0]]
+    def col(*keys):
+        for i,h in enumerate(head):
+            if any(k in h for k in keys): return i
+        return -1
+    ci=col("код_товару","код товару","артикул","article","код","ідентифікатор")
+    cp=col("ціна","price"); cav=col("наявн","availab","presence"); cq=col("кільк","quantity","qty","залиш","остат")
+    if ci<0 or cp<0:
+        print(f"[bmparts] /prices/list: колонки не розпізнані {head[:8]}"); return {}
+    out={}
+    for r in rows[1:]:
+        if ci>=len(r) or cp>=len(r): continue
+        art=str(r[ci]).strip().upper(); price=num(r[cp])
+        if not art or price<=0: continue
+        qty=num(r[cq]) if 0<=cq<len(r) else 0
+        av=(r[cav].strip().lower() if 0<=cav<len(r) else "")
+        available=("наявн" in av or av in ("+","true","1","в наявності","у наявності")) or qty>0
+        if art not in out or price<out[art]["price"]:
+            out[art]={"price":price,"qty":int(qty),"presence":"available" if available else "order"}
+    print(f"[bmparts] /prices/list: {len(out)} унікальних артикулів (одним запитом)")
+    return out
+
 def _bmparts_price_map(brands=None):
     """Прайс BM Parts у форматі Prom по КАР-БРЕНДАХ. brands=None -> УСІ авто-марки з каталогу
     (GET /catalog/cars/brands/), або список із BMPARTS_BRANDS. Так знаходимо не лише BMW,
     а й Mercedes/VAG/Audi/… Повертає {article(UPPER): {'price','qty','presence'}}.
     price = собівартість (закупівельна ціна постачальника, підтверджено). Лише товари в наявності."""
+    if not brands and not os.environ.get("BMPARTS_BRANDS"):
+        _m=_bmparts_list_map()                 # спершу ОДИН запит на всі бренди (/prices/list)
+        if _m: return _m
+        print("[bmparts] /prices/list дав 0 — fallback на per-brand /prices/prom")
     token=os.environ.get("BMPARTS_TOKEN")
     if not token: print("[bmparts] нема BMPARTS_TOKEN — пропуск"); return {}
     import csv as _csv
@@ -471,7 +521,7 @@ def write_report(gc, catalog, best, instock, overrides, comps, guard_status=None
             rows.append([art, info.get("name",""), newp, chg, pres, qty,
                 b.get("brand",""), b.get("cost",""), guard_status.get(art,"оновлено")])
         else:
-            rows.append([art, info.get("name",""), "", "", "", "", "", "", "НЕМА ПОСТАЧАЛЬНИКА"])
+            rows.append([art, info.get("name",""), "", "", "", "", "", "", "Ручне коригування ціни"])
     ss=gc.open_by_key(ID_HUB)
     RTAB="Звіт_Ціни" # окрема вкладка звіту цін (не плутати з карткою «Звіт»)
     ws=None
