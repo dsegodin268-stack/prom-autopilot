@@ -1,0 +1,22 @@
+name: sync-bmparts
+on:
+  schedule:
+    - cron: "43 4 * * *"     # ~07:43 Київ — окремий процес синхронізації дзеркала BM Parts
+  workflow_dispatch: {}
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -r requirements.txt
+      - name: Sync BMParts tab
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          BMPARTS_TOKEN: ${{ secrets.BMPARTS }}
+          BMPARTS_BRANDS: ${{ vars.BMPARTS_BRANDS }}
+          BM_MIN_INTERVAL: "0.8"
+          BMPARTS_TAB_LIMIT: ${{ vars.BMPARTS_TAB_LIMIT }}
+          LIVE: ${{ vars.LIVE }}
+        run: python sync_bmparts.py
