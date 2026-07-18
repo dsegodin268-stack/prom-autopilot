@@ -19,6 +19,7 @@ jobs:
           PROM_API_KEY: ${{ secrets.PROM_API_KEY }}
           AUTONOVA_FOLDER_ID: ${{ secrets.AUTONOVA_FOLDER_ID }}
           AUTONOVA_COOKIE: ${{ secrets.AUTONOVA_COOKIE }}
+          AUTONOVA_PROXY: ${{ secrets.AUTONOVA_PROXY }}
           BMPARTS_TOKEN: ${{ secrets.BMPARTS }}
           BMPARTS_BRANDS: ${{ vars.BMPARTS_BRANDS }}
           BM_MIN_INTERVAL: "0.8"
