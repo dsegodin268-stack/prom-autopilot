@@ -341,6 +341,38 @@ def _expand_code(code):
     return out
 
 # ================== AutoNova-WEB (джерело №2 — дилерські ціни під кукі) ==================
+AUTONOVA_PROXY=os.environ.get("AUTONOVA_PROXY") # напр. http://user:pass@ua-host:port — обхід блоку IP GitHub-раннера
+def _autonova_opener():
+    """Opener з проксі (якщо задано AUTONOVA_PROXY) — щоб ходити на autonovad.ua з українського IP."""
+    if AUTONOVA_PROXY:
+        h=urllib.request.ProxyHandler({"http":AUTONOVA_PROXY,"https":AUTONOVA_PROXY})
+        return urllib.request.build_opener(h)
+    return urllib.request.build_opener()
+def _autonova_diag(product_id, cookie):
+    """ТОЧНА діагностика контрольного запиту autonova-web: друкує HTTP-статус або тип
+    мережевої помилки. 401/403 -> кукі невалідна; timeout/refused/URLError -> блок IP раннера."""
+    import socket
+    url=f"{AUTONOVA_API}/{product_id}/extended-offers"
+    print(f"[autonova-diag] proxy={'ТАК' if AUTONOVA_PROXY else 'ні'}; cookie={'є' if cookie else 'НЕМА'} (довж {len(cookie or '')}); {url}")
+    req=urllib.request.Request(url, headers={"Cookie":cookie or "",
+        "Accept":"application/json","User-Agent":"Mozilla/5.0 (visimics-autopilot)"})
+    try:
+        with _autonova_opener().open(req, timeout=25) as r:
+            body=r.read(200).decode("utf-8","replace")
+            print(f"[autonova-diag] HTTP {getattr(r,'status',200)} OK; тіло[:100]={body[:100]!r}")
+    except urllib.error.HTTPError as e:
+        b=""
+        try: b=e.read(200).decode("utf-8","replace")
+        except Exception: pass
+        verdict=("КУКІ невалідна/протухла" if e.code in (401,403) else
+                 "редирект на гостя (кукі)" if e.code in (301,302) else "інша HTTP-помилка")
+        print(f"[autonova-diag] HTTPError {e.code} {e.reason} -> {verdict}; тіло[:100]={b[:100]!r}")
+    except urllib.error.URLError as e:
+        print(f"[autonova-diag] URLError {e.reason!r} -> БЛОК IP / мережа / DNS")
+    except socket.timeout:
+        print("[autonova-diag] TIMEOUT -> БЛОК IP / фаєрвол")
+    except Exception as e:
+        print(f"[autonova-diag] {type(e).__name__}: {str(e)[:120]}")
 def _autonova_fetch(product_id, cookie):
     """GET .../api/products/{product_id}/extended-offers під дилерською кукі. JSON або None."""
     url=f"{AUTONOVA_API}/{product_id}/extended-offers"
@@ -351,7 +383,7 @@ def _autonova_fetch(product_id, cookie):
     })
     for attempt in range(3): # 520 у origin буває транзієнтним
         try:
-            with urllib.request.urlopen(req, timeout=25) as r:
+            with _autonova_opener().open(req, timeout=25) as r:
                 return json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             if e.code in (502,503,520,522,524) and attempt<2: time.sleep(1.2); continue
@@ -390,7 +422,10 @@ def autonova_web_authorized(cookie):
     краще нічого не писати, ніж записати завищену собівартість."""
     code,bid,thr=AUTONOVA_REF
     d=_autonova_fetch(f"{code}_{bid}", cookie)
-    if not d: print("[autonova-web] реф. запит не вдався — пропуск (кукі/мережа)"); return False
+    if not d:
+        print("[autonova-web] реф. запит не вдався — пропуск (кукі/мережа)")
+        _autonova_diag(f"{code}_{bid}", cookie)  # точна причина: HTTP-статус (кукі) vs мережа (блок IP)
+        return False
     ref=num((d.get("bestDelivery") or {}).get("price",{}).get("current"))
     if 0<ref<thr:
         print(f"[autonova-web] авторизація OK (дилерська реф.ціна {ref:.0f} < {thr})"); return True
