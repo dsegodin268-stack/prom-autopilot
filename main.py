@@ -437,6 +437,7 @@ def _autonova_brand_for(code):
     решта алфанумерик (4H,4L,8W,4M,G0,80A,3R,5GE...) -> VAG(1)."""
     c=str(code).strip().upper()
     if not c: return None
+    if c.startswith("WAP") or (c[:1]=="9" and len(c)>=8): return 81 # Porsche (WAP-аксесуари, 9-шасі коди)
     if c.isdigit(): return 72
     if c[:1]=="A" and c[1:2].isdigit(): return 56
     return 1
@@ -447,7 +448,7 @@ def pull_autonova_web(codes, best, instock, cookie):
     if not cookie: print("[autonova-web] нема AUTONOVA_COOKIE — пропуск"); return
     if not autonova_web_authorized(cookie): return
     limit=int(num(os.environ.get("AUTONOVA_WEB_LIMIT") or 0)) # 0 = всі (для тесту можна обмежити)
-    ALL_BRANDS=[int(x) for x in (os.environ.get("AUTONOVA_BRANDS") or "1,72,56,59").split(",") if x.strip()] # VAG=1,BMW=72,Mercedes=56,Mann=59
+    ALL_BRANDS=[int(x) for x in (os.environ.get("AUTONOVA_BRANDS") or "1,72,56,59,81,16").split(",") if x.strip()] # VAG=1,BMW=72,Mercedes=56,Mann=59,Porsche=81,+16
     n_ok=n_pair=n_avail=0; seen=0
     for code in codes:
         if limit and seen>=limit: break
