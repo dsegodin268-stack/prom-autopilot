@@ -486,6 +486,10 @@ def pull_autonova_web(codes, best, instock, cookie):
             if cand_whole and cand_whole!=sp[0]:                 # запасний варіант: весь код алфанум
                 r2=_autonova_code_best(cand_whole, bid, cookie); time.sleep(0.12)
                 if r2: res=[r2]; break
+            base_rev=_re2.sub(r"[A-Za-z]$","",sp[0]) if sp else ""  # VAG ревізійна літера: 8X0075101A->8X0075101, 8K0071761D->8K0071761
+            if base_rev and len(base_rev)>=6 and base_rev!=sp[0]:
+                r3=_autonova_code_best(base_rev, bid, cookie); time.sleep(0.12)
+                if r3: res=[r3]; break
         if not res: continue
         cost=sum(r["cost"] for r in res) # пара = сума собівартостей
         available=all(r["presence"]=="available" for r in res)
