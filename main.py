@@ -449,22 +449,43 @@ def pull_autonova_web(codes, best, instock, cookie):
     if not autonova_web_authorized(cookie): return
     limit=int(num(os.environ.get("AUTONOVA_WEB_LIMIT") or 0)) # 0 = всі (для тесту можна обмежити)
     ALL_BRANDS=[int(x) for x in (os.environ.get("AUTONOVA_BRANDS") or "1,72,56,59,81,16").split(",") if x.strip()] # VAG=1,BMW=72,Mercedes=56,Mann=59,Porsche=81,+16
+    import re as _re2
+    def _av_parts(c):
+        # Автонова-код = артикул БЕЗ пробілів (дилерський суфікс лишається!), розбитий по
+        # роздільниках пар '+' та '-'. Реальні промахи (перевірено на сайті autonovad.ua):
+        #   '80A061276A MNO' -> '80A061276AMNO'; '7P1061500  041' -> '7P1061500041';
+        #   '5H0853688ADBOP+5H0853688A' -> перша половина '5H0853688ADBOP' (друга відсутня).
+        raw=[]
+        for seg in str(c).split("+"):     # '+' -> окремі повні номери (грилі-варіанти)
+            raw+=_expand_code(seg)         # '-' -> повні номери з дотягуванням суфікса
+        out=[]
+        for p in raw:
+            p=_re2.sub(r"\s+","",str(p)).strip()   # ПРИБРАТИ ПРОБІЛИ (ключовий фікс)
+            if p and len(p)>=5 and p not in out: out.append(p)
+        return out
     n_ok=n_pair=n_avail=0; seen=0
     for code in codes:
         if limit and seen>=limit: break
         seen+=1
-        parts=_expand_code(code) # дефіс -> повні номери (суфікс дотягується префіксом першого)
-        if not parts: continue
-        guess=_autonova_brand_for(code) # спершу пробуємо вгадану марку (VAG-код -> 1), далі решта
+        sp=_av_parts(code)
+        cand_whole=_nkey(code)             # весь код лише алфанум: '19-276922' -> '19276922'
+        if not sp and cand_whole: sp=[cand_whole]
+        if not sp: continue
+        guess=_autonova_brand_for(code) # спершу вгадана марка (VAG-код -> 1), далі решта
         order=([guess]+[b for b in ALL_BRANDS if b!=guess]) if guess else ALL_BRANDS
-        res=None
+        res=None; is_pair=False
         for bid in order:
-            acc=[]; ok=True
-            for part in parts:
-                r=_autonova_code_best(part, bid, cookie)
-                if not r: ok=False; break
-                acc.append(r); time.sleep(0.15) # ввічливо до API
-            if ok and acc: res=acc; break
+            if len(sp)>=2:
+                acc=[_autonova_code_best(p, bid, cookie) for p in sp]
+                for _ in sp: time.sleep(0.12)
+                if all(acc): res=acc; is_pair=True; break        # справжня пара -> сума половин
+                elif acc and acc[0]: res=[acc[0]]; break         # інакше -> ціна за ПЕРШОЮ половиною
+            else:
+                r=_autonova_code_best(sp[0], bid, cookie); time.sleep(0.12)
+                if r: res=[r]; break
+            if cand_whole and cand_whole!=sp[0]:                 # запасний варіант: весь код алфанум
+                r2=_autonova_code_best(cand_whole, bid, cookie); time.sleep(0.12)
+                if r2: res=[r2]; break
         if not res: continue
         cost=sum(r["cost"] for r in res) # пара = сума собівартостей
         available=all(r["presence"]=="available" for r in res)
@@ -473,7 +494,7 @@ def pull_autonova_web(codes, best, instock, cookie):
             {"name":"", "cost":cost, "qty":qty,
              "presence":"available" if available else "order", "brand":"Авто-web"}, instock)
         n_ok+=1
-        if len(parts)>1: n_pair+=1
+        if is_pair: n_pair+=1
         if available: n_avail+=1
     print(f"[autonova-web] додано {n_ok} кодів (пар: {n_pair}, у наявності: {n_avail}) з {seen} перевірених")
 
