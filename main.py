@@ -231,7 +231,7 @@ def _bmparts_list_map():
     out={}
     for r in rows[1:]:
         if ci>=len(r) or cp>=len(r): continue
-        art=str(r[ci]).strip().upper(); price=num(r[cp])
+        art=_nkey(r[ci]); price=num(r[cp]) # нормалізуємо: BM Parts артикули з дефісами (20114-0050-99 -> 20114005099)
         if not art or price<=0: continue
         qty=num(r[cq]) if 0<=cq<len(r) else 0
         av=(r[cav].strip().lower() if 0<=cav<len(r) else "")
@@ -293,7 +293,7 @@ def _bmparts_price_map(brands=None):
         n=0
         for r in rows[1:]:
             if ci>=len(r) or cp>=len(r): continue
-            art=str(r[ci]).strip().upper(); price=num(r[cp])
+            art=_nkey(r[ci]); price=num(r[cp]) # нормалізуємо (дефіси в артикулах BM Parts)
             if not art or price<=0: continue
             qty=num(r[cq]) if 0<=cq<len(r) else 0
             av=(r[cav].strip().lower() if 0<=cav<len(r) else "")
@@ -313,8 +313,7 @@ def pull_bmparts(codes, best, instock, brands=None):
     if not pm: print("[bmparts] мапа порожня — нічого не додано"); return
     n_ok=n_avail=0
     for code in codes:
-        k=_re.split(r"[-–—]", str(code))[0].strip().upper() # номер до тире
-        rec=pm.get(k)
+        rec=pm.get(_nkey(code)) or pm.get(_nkey(_re.split(r"[-–—]", str(code))[0])) # нормалізований збіг: цілий код, потім номер до тире
         if not rec: continue
         av=(rec["presence"]=="available" and rec["qty"]>0)
         keep_best(best, str(code).strip().upper(),
