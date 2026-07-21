@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ЗАДАЧА 1 — синхронізація наявності BM Parts у вкладку «BMParts».
+"""ЗАДАЧА 1 — синхронізація наявності BM Parts в ОКРЕМУ книгу «BM Parts» (вкладка «BMParts»).
+Раніше писало у вкладку головної Prom-таблиці; 2026-07-19 винесено, щоб не роздувати її.
 
 ВАЖЛИВО: per-brand ендпоінт /prices/prom/{brand} повертає 0 по всіх марках
 (підтверджено логами), тож використовуємо POST /prices/list — усі бренди
@@ -12,7 +13,11 @@ BM Parts віддають ЛИШЕ товари в наявності, тому 
 Захист розміру: BMPARTS_TAB_LIMIT (0 = усі позиції; база велика — ~124k рядків)."""
 import os, io, csv, json
 
-ID_HUB="1pesHiOHDq2Y4FYQECakfhIJlq08bg5_Pkm9e2YEDoic"
+ID_HUB="1pesHiOHDq2Y4FYQECakfhIJlq08bg5_Pkm9e2YEDoic"   # головна таблиця Prom (сюди БІЛЬШЕ не пишемо)
+# 2026-07-19: дзеркало BM Parts винесено в ОКРЕМУ книгу «BM Parts», щоб не роздувати
+# головну таблицю (було 125k рядків / 21.7 МБ у ній). Залежностей у Prom-таблиці немає:
+# перевірено пошуком по всіх аркушах з формулами + Apps Script + кодом — ніхто її не читає.
+ID_BMPARTS=os.environ.get("BMPARTS_SHEET_ID") or "1sGAA3KRHKm4oeNtL56MpAr3BaMWBmajZ7hGtDnb12Q0"
 BM_TAB="BMParts"
 LIVE=os.environ.get("LIVE")=="1"
 ROW_LIMIT=int(float(os.environ.get("BMPARTS_TAB_LIMIT") or 0))  # 0 = усі позиції
@@ -58,7 +63,7 @@ def main():
         print("[bmparts] DRY-RUN (LIVE≠1): у «BMParts» НЕ писав. Перші рядки:")
         for rr in grid[:4]: print("  ", " | ".join(str(x)[:16] for x in rr[:8]))
         return
-    ss=gc.open_by_key(ID_HUB)
+    ss=gc.open_by_key(ID_BMPARTS)   # окрема книга «BM Parts» (не головна Prom-таблиця)
     ws=None
     for w in ss.worksheets():
         if w.title.strip().casefold()==BM_TAB.casefold(): ws=w; break
@@ -70,6 +75,7 @@ def main():
     for j in range(0, len(grid), B):
         ws.update(values=grid[j:j+B], range_name=f"A{j+1}")
         print(f"[bmparts] записано рядки {j+1}..{min(j+B,len(grid))}")
-    print(f"[bmparts] ЗАПИСАНО в «{BM_TAB}»: {len(grid)-1} позицій (актуальне дзеркало наявності BM Parts).")
+    print(f"[bmparts] ЗАПИСАНО в книгу «BM Parts» ({ID_BMPARTS}), вкладка «{BM_TAB}»: "
+          f"{len(grid)-1} позицій (актуальне дзеркало наявності BM Parts).")
 
 if __name__=="__main__": main()
