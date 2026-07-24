@@ -83,7 +83,8 @@ def _autonova_fetch(product_id, cookie):
 
 
 def _autonova_code_best(code, brand_id, cookie):
-    """Мінімум по ВСІХ пропозиціях (bestPrice/bestDelivery у API брехливі)."""
+    """Вибір пропозиції по ОДНОМУ номеру. Пріоритет — НАЙМЕНШИЙ термін постачання
+    (bestPrice/bestDelivery у API брехливі — рахуємо самі)."""
     d = _autonova_fetch(f"{code}_{brand_id}", cookie)
     if not d:
         return None
@@ -99,14 +100,22 @@ def _autonova_code_best(code, brand_id, cookie):
                 "days": num((o.get("delivery") or {}).get("days")),
                 "own": (o.get("category") == "offers"),
             })
+    best = pick_offer(cand)
+    if not best:
+        return None
+    available = best["days"] <= 1 and best["qty"] > 0  # є сьогодні / на складі
+    return {"cost": best["price"], "qty": int(best["qty"]) if available else 0,
+            "presence": "available" if available else "order", "days": best["days"]}
+
+
+def pick_offer(cand):
+    """ПРАВИЛО (власник, 24.07): з-поміж пропозицій обирає з НАЙМЕНШИМ терміном
+    постачання; серед однаково швидких — найдешевшу. Ціна береться САМЕ з цієї
+    пропозиції, бо доставку реально виконуватимемо через найшвидшого постачальника
+    (дешева-але-повільна пропозиція нас не рятує). cand: [{price,qty,days,own}]."""
     if not cand:
         return None
-    own_stock = [c for c in cand if c["own"] and c["qty"] > 0 and c["days"] <= 1]
-    if own_stock:
-        b = min(own_stock, key=lambda c: c["price"])
-        return {"cost": b["price"], "qty": int(b["qty"]), "presence": "available"}
-    cheapest = min(cand, key=lambda c: c["price"])
-    return {"cost": cheapest["price"], "qty": 0, "presence": "order"}
+    return min(cand, key=lambda c: (c["days"], c["price"]))
 
 
 def autonova_web_authorized(cookie):
