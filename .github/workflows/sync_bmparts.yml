@@ -1,7 +1,7 @@
 name: sync-bmparts
 on:
   schedule:
-    - cron: "43 4 * * *"     # ~07:43 Київ — окремий процес синхронізації дзеркала BM Parts
+    - cron: "43 4 * * *"   # ~07:43 Київ — дзеркало BM Parts
   workflow_dispatch: {}
 jobs:
   sync:
@@ -19,4 +19,4 @@ jobs:
           BM_MIN_INTERVAL: "0.8"
           BMPARTS_TAB_LIMIT: ${{ vars.BMPARTS_TAB_LIMIT }}
           LIVE: ${{ vars.LIVE }}
-        run: python sync_bmparts.py
+        run: python -m bmparts_mirror.run

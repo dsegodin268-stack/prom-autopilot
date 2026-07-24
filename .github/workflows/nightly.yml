@@ -1,8 +1,13 @@
 name: nightly-reprice
 on:
   schedule:
-    - cron: "23 5 * * *"     # ~08:23 Київ (8 ранку зі зсувом — GitHub рідше дропає не о рівній годині)
-  workflow_dispatch: {}
+    - cron: "23 5 * * *"   # ~08:23 Київ
+  workflow_dispatch:
+    inputs:
+      live:
+        description: "1 = писати в таблицю; 0 = DRY-RUN; порожньо = як vars.LIVE"
+        required: false
+        default: ""
 jobs:
   reprice:
     runs-on: ubuntu-latest
@@ -14,16 +19,12 @@ jobs:
       - name: Repricer
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-          MAIL_USER: ${{ secrets.MAIL_USER }}
-          MAIL_PASS: ${{ secrets.MAIL_PASS }}
-          PROM_API_KEY: ${{ secrets.PROM_API_KEY }}
           AUTONOVA_FOLDER_ID: ${{ secrets.AUTONOVA_FOLDER_ID }}
           AUTONOVA_COOKIE: ${{ secrets.AUTONOVA_COOKIE }}
           AUTONOVA_PROXY: ${{ secrets.AUTONOVA_PROXY }}
           BMPARTS_TOKEN: ${{ secrets.BMPARTS }}
           BMPARTS_BRANDS: ${{ vars.BMPARTS_BRANDS }}
           BM_MIN_INTERVAL: "0.8"
-          LIVE: ${{ vars.LIVE }}
+          LIVE: ${{ github.event.inputs.live || vars.LIVE }}
           LIVE_ONLY: ${{ vars.LIVE_ONLY }}
-          LIVE_LIMIT: ${{ vars.LIVE_LIMIT }}
-        run: python main.py
+        run: python -m repricing.run

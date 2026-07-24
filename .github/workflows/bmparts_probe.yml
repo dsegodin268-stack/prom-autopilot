@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       article:
-        description: "Артикул для тесту (код товару BM Parts)"
+        description: "Артикул для тесту (або BULK:BMW)"
         required: true
 jobs:
   probe:
@@ -17,4 +17,4 @@ jobs:
         env:
           BMPARTS_TOKEN: ${{ secrets.BMPARTS }}
           PROBE_ARTICLE: ${{ github.event.inputs.article }}
-        run: python bmparts.py
+        run: python -m tools.bmparts_probe
