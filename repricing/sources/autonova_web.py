@@ -150,87 +150,135 @@ def _autonova_brand_for(code):
     return 1
 
 
+def _all_brands():
+    return [int(x) for x in (os.environ.get("AUTONOVA_BRANDS") or "1,72,56,59,81,16").split(",") if x.strip()]
+
+
+def _av_parts(c):
+    """Розбиває код на реальні номери autonova (пробіли прибрані, '+'/'-' -> окремі)."""
+    raw = []
+    for seg in str(c).split("+"):
+        raw += _expand_code(seg)
+    out = []
+    for p in raw:
+        p = re.sub(r"\s+", "", str(p)).strip()
+        if p and len(p) >= 5 and p not in out:
+            out.append(p)
+    return out
+
+
+def _resolve_autonova(code, cookie, all_brands):
+    """Резолвить ОДИН код на autonova (перебір brandId, пари, ревізії) ->
+    item {name,cost,qty,days,presence,brand} або None. Дефіс/'+' = пара:
+    собівартість=сума, наявна лише якщо ОБИДВІ є, термін=найдовший з половин."""
+    sp = _av_parts(code)
+    cand_whole = _nkey(code)
+    if not sp and cand_whole:
+        sp = [cand_whole]
+    if not sp:
+        return None
+    guess = _autonova_brand_for(code)
+    order = ([guess] + [b for b in all_brands if b != guess]) if guess else all_brands
+    res = None
+    for bid in order:
+        if len(sp) >= 2:
+            acc = [_autonova_code_best(p, bid, cookie) for p in sp]
+            for _ in sp:
+                time.sleep(0.12)
+            if all(acc):
+                res = acc
+                break
+            elif acc and acc[0]:
+                res = [acc[0]]
+                break
+        else:
+            r = _autonova_code_best(sp[0], bid, cookie)
+            time.sleep(0.12)
+            if r:
+                res = [r]
+                break
+            if cand_whole and cand_whole != sp[0]:
+                r2 = _autonova_code_best(cand_whole, bid, cookie)
+                time.sleep(0.12)
+                if r2:
+                    res = [r2]
+                    break
+            base_rev = re.sub(r"[A-Za-z]$", "", sp[0]) if sp else ""
+            if base_rev and len(base_rev) >= 6 and base_rev != sp[0]:
+                r3 = _autonova_code_best(base_rev, bid, cookie)
+                time.sleep(0.12)
+                if r3:
+                    res = [r3]
+                    break
+    if not res:
+        return None
+    cost = sum(r["cost"] for r in res)
+    available = all(r["presence"] == "available" for r in res)
+    qty = min(int(r["qty"]) for r in res) if available else 0
+    days = max(int(r.get("days") or 0) for r in res)  # пара: обидві половини мають приїхати -> найдовший термін
+    return {"name": "", "cost": cost, "qty": qty, "days": days,
+            "presence": "available" if available else "order", "brand": "Авто-web"}
+
+
 def pull_autonova_web(codes, best, instock, cookie):
-    """Для кодів БЕЗ постачальника — ціна/наявність з catalogue-api.
-    Дефіс = пара номерів: собівартість = сума, наявна лише якщо ОБИДВІ є."""
+    """Для кодів БЕЗ постачальника — ціна/наявність з catalogue-api."""
     if not cookie:
         print("[autonova-web] нема AUTONOVA_COOKIE — пропуск")
         return
     if not autonova_web_authorized(cookie):
         return
     limit = int(num(os.environ.get("AUTONOVA_WEB_LIMIT") or 0))  # 0 = всі
-    ALL_BRANDS = [int(x) for x in (os.environ.get("AUTONOVA_BRANDS") or "1,72,56,59,81,16").split(",") if x.strip()]
-
-    def _av_parts(c):
-        raw = []
-        for seg in str(c).split("+"):
-            raw += _expand_code(seg)
-        out = []
-        for p in raw:
-            p = re.sub(r"\s+", "", str(p)).strip()
-            if p and len(p) >= 5 and p not in out:
-                out.append(p)
-        return out
-
-    n_ok = n_pair = n_avail = 0
+    all_brands = _all_brands()
+    n_ok = n_avail = 0
     seen = 0
     for code in codes:
         if limit and seen >= limit:
             break
         seen += 1
-        sp = _av_parts(code)
-        cand_whole = _nkey(code)
-        if not sp and cand_whole:
-            sp = [cand_whole]
-        if not sp:
+        item = _resolve_autonova(code, cookie, all_brands)
+        if not item:
             continue
-        guess = _autonova_brand_for(code)
-        order = ([guess] + [b for b in ALL_BRANDS if b != guess]) if guess else ALL_BRANDS
-        res = None
-        is_pair = False
-        for bid in order:
-            if len(sp) >= 2:
-                acc = [_autonova_code_best(p, bid, cookie) for p in sp]
-                for _ in sp:
-                    time.sleep(0.12)
-                if all(acc):
-                    res = acc
-                    is_pair = True
-                    break
-                elif acc and acc[0]:
-                    res = [acc[0]]
-                    break
-            else:
-                r = _autonova_code_best(sp[0], bid, cookie)
-                time.sleep(0.12)
-                if r:
-                    res = [r]
-                    break
-                if cand_whole and cand_whole != sp[0]:
-                    r2 = _autonova_code_best(cand_whole, bid, cookie)
-                    time.sleep(0.12)
-                    if r2:
-                        res = [r2]
-                        break
-                base_rev = re.sub(r"[A-Za-z]$", "", sp[0]) if sp else ""
-                if base_rev and len(base_rev) >= 6 and base_rev != sp[0]:
-                    r3 = _autonova_code_best(base_rev, bid, cookie)
-                    time.sleep(0.12)
-                    if r3:
-                        res = [r3]
-                        break
-        if not res:
-            continue
-        cost = sum(r["cost"] for r in res)
-        available = all(r["presence"] == "available" for r in res)
-        qty = min(int(r["qty"]) for r in res) if available else 0
-        days = max(int(r.get("days") or 0) for r in res)  # пара: обидві половини мають приїхати -> найдовший термін
-        keep_best(best, str(code).strip().upper(),
-                  {"name": "", "cost": cost, "qty": qty, "days": days,
-                   "presence": "available" if available else "order", "brand": "Авто-web"}, instock)
+        keep_best(best, str(code).strip().upper(), item, instock)
         n_ok += 1
-        if is_pair:
-            n_pair += 1
-        if available:
+        if item["presence"] == "available":
             n_avail += 1
-    print(f"[autonova-web] додано {n_ok} кодів (пар: {n_pair}, у наявності: {n_avail}) з {seen} перевірених")
+    print(f"[autonova-web] додано {n_ok} кодів (у наявності: {n_avail}) з {seen} перевірених")
+
+
+def recheck_autonova_faster(codes, best, instock, cookie):
+    """КРОС-ПЕРЕВІРКА (власник, 24.07): позиції, що ВЖЕ мають постачальника з прайсів
+    (BMW/Porsche/Drive/BMParts), але стоять «під замовлення», перевіряємо на autonova.
+    Якщо autonova має код ШВИДШЕ (менший термін, зокрема в наявності) — замінюємо
+    позицію на autonova (ціна+наявність+термін). «Найшвидший постачальник виграє»
+    вже МІЖ джерелами. Ліміт AUTONOVA_RECHECK_LIMIT (0 = усі)."""
+    if not cookie:
+        print("[recheck] нема AUTONOVA_COOKIE — крос-перевірку пропущено")
+        return
+    if not autonova_web_authorized(cookie):
+        return
+    limit = int(num(os.environ.get("AUTONOVA_RECHECK_LIMIT") or 0))  # 0 = усі
+    all_brands = _all_brands()
+    n_check = n_up = n_avail = 0
+    for code in codes:
+        if limit and n_check >= limit:
+            break
+        n_check += 1
+        k = str(code).strip().upper()
+        cur = best.get(k)
+        if not cur:
+            continue
+        cur_days = int(num(cur.get("days"))) if cur.get("days") is not None else 15
+        item = _resolve_autonova(code, cookie, all_brands)
+        if not item:
+            continue
+        new_days = int(item.get("days") or 0)
+        if new_days < cur_days:  # autonova швидша -> ціну/наявність/термін беремо з autonova
+            item["article"] = k
+            best[k] = item
+            if item["presence"] == "available" and item["qty"] > 0:
+                instock[k] = int(item["qty"])
+                n_avail += 1
+            else:
+                instock.pop(k, None)
+            n_up += 1
+    print(f"[recheck] autonova крос-перевірка: {n_check} перевірено, {n_up} прискорено (у наявності: {n_avail})")
