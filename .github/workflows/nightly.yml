@@ -25,6 +25,7 @@ jobs:
           BMPARTS_TOKEN: ${{ secrets.BMPARTS }}
           BMPARTS_BRANDS: ${{ vars.BMPARTS_BRANDS }}
           BM_MIN_INTERVAL: "0.8"
+          AUTONOVA_RECHECK_LIMIT: ${{ vars.AUTONOVA_RECHECK_LIMIT }}
           LIVE: ${{ github.event.inputs.live || vars.LIVE }}
           LIVE_ONLY: ${{ vars.LIVE_ONLY }}
         run: python -m repricing.run
