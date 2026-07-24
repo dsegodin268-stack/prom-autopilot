@@ -26,7 +26,7 @@ from repricing.overrides import get_overrides, get_competitors
 from repricing.report import write_report
 from repricing.sources.bmw_porsche_sheets import read_all_tabs
 from repricing.sources.autonova_drive import pull_autonova_drive
-from repricing.sources.autonova_web import pull_autonova_web
+from repricing.sources.autonova_web import pull_autonova_web, recheck_autonova_faster
 from repricing.sources.bmw_pairs import pull_pairs_from_best
 from repricing.sources.bmparts_prices import pull_bmparts
 
@@ -75,6 +75,17 @@ def main():
         pull_bmparts(_miss, best, instock)
     _left = [c for c in idx if c not in best]
     print(f"[supply+] після добору: собівартість {len(best)}; лишилось без постачальника {len(_left)}")
+
+    # --- 2б) КРОС-ПЕРЕВІРКА autonova (власник, 24.07): позиції «під замовлення» з
+    # прайсів (BMW/Porsche/Drive/BMParts) можуть бути в наявності на autonova ->
+    # ставимо реальну (кращу) наявність/термін, ціну з найшвидшого джерела. ---
+    if cookie:
+        order_codes = [c for c in idx
+                       if c in best and best[c].get("presence") == "order"
+                       and best[c].get("brand") != "Авто-web"]
+        print(f"[recheck] «під замовлення» з прайсів для крос-перевірки autonova: {len(order_codes)}")
+        if order_codes:
+            recheck_autonova_faster(order_codes, best, instock, cookie)
 
     # --- 3) розрахунок + якірний захист + підготовка запису ---
     only = os.environ.get("LIVE_ONLY")
