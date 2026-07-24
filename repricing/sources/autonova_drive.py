@@ -84,7 +84,7 @@ def pull_autonova_drive(folder_id, best, instock):
             qty = sum(num(r[c]) for c in range(5, 23) if c < len(r))
             if qty <= 0:
                 continue
-            keep_best(best, r[2], {"name": str(r[1] or ""), "cost": cost, "qty": qty,
+            keep_best(best, r[2], {"name": str(r[1] or ""), "cost": cost, "qty": qty, "days": 0,
                                    "presence": "available", "brand": "Авто"}, instock)
             n += 1
         print(f"[autonova] Drive '{files[0]['name']}': {n} поз.")

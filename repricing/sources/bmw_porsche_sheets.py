@@ -1,7 +1,18 @@
 # -*- coding: utf-8 -*-
 """Джерело 1–2: прайси BMW і Porsche з Google-таблиць постачальника."""
+import re
+
 from common.normalize import num, _norm
 from repricing.sources.base import keep_best
+
+
+def _tab_days(nt):
+    """Термін постачання (днів) з назви вкладки прайсу: '2-3'->3, '15 днів'->15,
+    інакше дефолт 15. Для наявних вкладок термін не потрібен (0)."""
+    if "2-3" in nt or "2–3" in nt or "23дн" in nt:
+        return 3
+    days = [int(x) for x in re.findall(r"\d+", nt) if 0 < int(x) <= 60]
+    return max(days) if days else 15
 
 
 def read_all_tabs(gc, sid, brand, best, instock, force=None):
@@ -23,6 +34,7 @@ def read_all_tabs(gc, sid, brand, best, instock, force=None):
             presence = "order"
         else:
             presence = "available"
+        days = 0 if presence == "available" else _tab_days(nt)
         try:
             rows = ws.get_all_values()
         except Exception as e:
@@ -43,7 +55,7 @@ def read_all_tabs(gc, sid, brand, best, instock, force=None):
                 qty = 0
             if cost <= 0:
                 continue
-            keep_best(best, art, {"name": r[1], "cost": cost, "qty": qty,
+            keep_best(best, art, {"name": r[1], "cost": cost, "qty": qty, "days": days,
                                   "presence": presence, "brand": brand}, instock)
             n += 1
         print(f"[sheet] {brand}/{title}: {n} поз. ({presence})")

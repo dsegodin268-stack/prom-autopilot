@@ -166,9 +166,10 @@ def pull_bmparts(codes, best, instock, brands=None):
         if not rec:
             continue
         av = (rec["presence"] == "available" and rec["qty"] > 0)
+        # BM Parts /prices/list не віддає термін для позицій під замовлення -> дефолт (15 у export)
         keep_best(best, str(code).strip().upper(),
                   {"name": "", "cost": rec["price"], "qty": int(rec["qty"]) if av else 0,
-                   "presence": "available" if av else "order", "brand": "BM Parts"}, instock)
+                   "days": 0, "presence": "available" if av else "order", "brand": "BM Parts"}, instock)
         n_ok += 1
         if av:
             n_avail += 1

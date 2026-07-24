@@ -224,8 +224,9 @@ def pull_autonova_web(codes, best, instock, cookie):
         cost = sum(r["cost"] for r in res)
         available = all(r["presence"] == "available" for r in res)
         qty = min(int(r["qty"]) for r in res) if available else 0
+        days = max(int(r.get("days") or 0) for r in res)  # пара: обидві половини мають приїхати -> найдовший термін
         keep_best(best, str(code).strip().upper(),
-                  {"name": "", "cost": cost, "qty": qty,
+                  {"name": "", "cost": cost, "qty": qty, "days": days,
                    "presence": "available" if available else "order", "brand": "Авто-web"}, instock)
         n_ok += 1
         if is_pair:
