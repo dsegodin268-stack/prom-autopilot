@@ -21,7 +21,7 @@ from common.normalize import num
 from common.pricing import price_with_competitor
 from common.sheets import gclient
 from repricing import guard
-from repricing.export_writer import read_export, write_updates
+from repricing.export_writer import read_export, write_updates, avail_cell
 from repricing.overrides import get_overrides, get_competitors
 from repricing.report import write_report
 from repricing.sources.bmw_porsche_sheets import read_all_tabs
@@ -102,12 +102,7 @@ def main():
         final_price_map[code] = int(newp)
 
         aq = instock.get(code, 0)  # наявність + кількість пишемо завжди (склад — не ціна)
-        if aq > 0:
-            row[C_AVAIL] = "+"
-            row[C_QTY] = int(aq)
-        else:
-            row[C_AVAIL] = "15"
-            row[C_QTY] = ""
+        row[C_AVAIL], row[C_QTY] = avail_cell(aq, it.get("days"))
         rn = i + 1
         updates.append({"range": f"P{rn}:Q{rn}", "values": [[row[C_AVAIL], row[C_QTY]]]})
         if ok:

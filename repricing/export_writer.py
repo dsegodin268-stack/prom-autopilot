@@ -3,6 +3,18 @@
 import re
 
 from common.config import ID_HUB, EXPORT_TAB, C_CODE, C_QTY
+from common.normalize import num
+
+
+def avail_cell(instock_qty, days):
+    """Значення колонок P(Наявність)/Q(Кількість) Export за правилом власника (24.07):
+    в наявності -> «!» (готово до відправки) + кількість;
+    під замовлення -> РЕАЛЬНИЙ термін постачання (днів), кількість порожня.
+    Термін ≤0/невідомий -> дефолт «15»."""
+    if num(instock_qty) > 0:
+        return "!", int(num(instock_qty))
+    d = int(num(days or 0))
+    return (str(d) if d > 0 else "15"), ""
 
 
 def read_export(gc):

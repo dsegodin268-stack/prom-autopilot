@@ -20,7 +20,11 @@ def write_report(gc, catalog, best, instock, overrides, comps, guard_status=None
             cur = num(info.get("price"))
             chg = ("%+.0f%%" % (100 * (num(newp) - cur) / cur)) if cur > 0 else ""
             aq = instock.get(art, 0)
-            pres = "в наявності" if aq > 0 else "під замовлення"
+            if aq > 0:
+                pres = "готово до відправки"  # в наявності = Prom «!»
+            else:
+                d = int(num(b.get("days"))) if b.get("days") is not None else 0
+                pres = f"під замовлення {d if d > 0 else 15} дн"
             qty = aq if aq > 0 else ""
             rows.append([art, info.get("name", ""), newp, chg, pres, qty,
                          b.get("brand", ""), b.get("cost", ""), guard_status.get(art, "оновлено")])
