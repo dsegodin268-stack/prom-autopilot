@@ -4,7 +4,12 @@
 контрольний запит — якщо кукі віддає гостьову ціну, НІЧОГО не пишемо.
 AUTONOVA_PROXY (опц.) — обхід блокування IP GitHub-раннерів.
 Статичний кеш autonova_web_cache.csv ВИДАЛЕНО 2026-07-24: 322 ціни, зібрані
-разово і ніколи не перевірялися — джерелом тепер є лише живий API."""
+разово і ніколи не перевірялися — джерелом тепер є лише живий API.
+
+ПРАВИЛО «ТІЛЬКИ ОРИГІНАЛ» (власник, 24.07): ціна/наявність береться ВИКЛЮЧНО з
+пропозицій на оригінальний (запитаний) номер. Аналоги та крос-номери відкидаються;
+якщо оригіналу нема в наявності — лишаємо «під замовлення» з ціною/терміном
+оригіналу, аналог НЕ підставляємо. Діагностика структури — env AUTONOVA_DEBUG=N."""
 import json
 import os
 import re
@@ -82,25 +87,103 @@ def _autonova_fetch(product_id, cookie):
     return None
 
 
+# --- розпізнавання ОРИГІНАЛ vs АНАЛОГ у відповіді autonova ---
+_ART_KEYS = ("article", "articleNr", "articleNumber", "number", "code", "sku",
+             "oem", "partNumber", "part_number", "articleCode", "articul", "brandCode")
+_BRAND_KEYS = ("brand", "producer", "manufacturer", "tradeMark", "trademark",
+               "brandName", "producerName")
+_ORIG_FLAGS = ("isoriginal", "original", "isoem", "oem", "isgenuine", "genuine")
+_ANALOG_FLAGS = ("isanalog", "analog", "isreplacement", "replacement", "iscross",
+                 "cross", "issubstitute", "substitute")
+# скільки лукапів повністю залогувати (структура відповіді) — env AUTONOVA_DEBUG (0=вимк)
+_dbg_left = [int(num(os.environ.get("AUTONOVA_DEBUG") or 0))]
+
+
+def _field(dct, keys):
+    """Перше непорожнє значення за списком ключів (регістронезалежно) як рядок."""
+    if not isinstance(dct, dict):
+        return ""
+    low = {str(k).lower(): v for k, v in dct.items()}
+    for k in keys:
+        v = low.get(k.lower())
+        if isinstance(v, dict):
+            v = v.get("name") or v.get("title") or v.get("value") or v.get("code")
+        if v not in (None, "", 0, "0"):
+            return str(v)
+    return ""
+
+
+def _flag(dct, keys):
+    """True, якщо будь-який із прапорців стоїть (bool/1/true/yes)."""
+    if not isinstance(dct, dict):
+        return False
+    low = {str(k).lower(): v for k, v in dct.items()}
+    for k in keys:
+        v = low.get(k)
+        if v is True:
+            return True
+        if isinstance(v, (int, float)) and v == 1:
+            return True
+        if isinstance(v, str) and v.strip().lower() in ("1", "true", "yes", "original", "оригінал"):
+            return True
+    return False
+
+
+def _is_original_offer(o, req, prod_art):
+    """Чи пропозиція стосується САМЕ оригінального номера (req = _nkey коду).
+    Пріоритет: явні прапорці -> артикул пропозиції -> артикул продукту ->
+    (жодних ознак) вважаємо оригіналом (ендпоінт і так по точному номеру)."""
+    art = _nkey(_field(o, _ART_KEYS))
+    if _flag(o, _ANALOG_FLAGS) and not _flag(o, _ORIG_FLAGS):
+        return bool(art) and art == req     # позначено як аналог -> тільки якщо номер збігається
+    if _flag(o, _ORIG_FLAGS):
+        return True
+    if art:
+        return art == req
+    if prod_art:
+        return prod_art == req
+    return True
+
+
 def _autonova_code_best(code, brand_id, cookie):
-    """Вибір пропозиції по ОДНОМУ номеру. Пріоритет — НАЙМЕНШИЙ термін постачання
-    (bestPrice/bestDelivery у API брехливі — рахуємо самі)."""
+    """ТІЛЬКИ ОРИГІНАЛ (власник, 24.07): по ОДНОМУ номеру беремо лише пропозиції на
+    САМЕ цей (оригінальний) номер; аналоги/крос-номери відкидаємо повністю.
+      • оригінал у наявності -> «available» з його ціною;
+      • оригінал є, але не в наявності -> «order» з ціною/терміном оригіналу;
+      • оригіналу на autonova нема (лише аналоги / нічого) -> None (НЕ підміняємо аналогом).
+    Серед пропозицій оригіналу: найменший термін, потім найдешевша."""
     d = _autonova_fetch(f"{code}_{brand_id}", cookie)
     if not d:
         return None
-    cand = []
+    req = _nkey(code)
+    prod_art = _nkey(_field(d, _ART_KEYS))
+    orig, analog, dump = [], [], []
     for grp in ("offers", "supplierOffers", "branchOffers", "consignmentOffers"):
         for o in (d.get(grp) or []):
             p = num((o.get("price") or {}).get("current"))
             if p <= 0:
                 continue
-            cand.append({
-                "price": p,
-                "qty": num(o.get("quantity")),
-                "days": num((o.get("delivery") or {}).get("days")),
-                "own": (o.get("category") == "offers"),
-            })
-    best = pick_offer(cand)
+            row = {"price": p, "qty": num(o.get("quantity")),
+                   "days": num((o.get("delivery") or {}).get("days")),
+                   "own": (grp == "offers")}
+            is_orig = _is_original_offer(o, req, prod_art)
+            (orig if is_orig else analog).append(row)
+            if _dbg_left[0] > 0:
+                dump.append((grp, _field(o, _ART_KEYS), _field(o, _BRAND_KEYS),
+                             p, row["qty"], row["days"], is_orig))
+    if _dbg_left[0] > 0:
+        _dbg_left[0] -= 1
+        print(f"[autonova-dbg] {code}_{brand_id} top-keys={sorted(d.keys())[:24]} "
+              f"prod_art={prod_art!r} orig={len(orig)} analog={len(analog)}")
+        for r in dump[:14]:
+            print(f"[autonova-dbg]   grp={r[0]} art={r[1]!r} brand={r[2]!r} "
+                  f"price={r[3]} qty={r[4]} days={r[5]} orig={r[6]}")
+    if not orig:
+        if analog:
+            print(f"[autonova] {code}: на autonova лише аналоги ({len(analog)}), "
+                  f"оригіналу нема -> пропускаю (тільки оригінал)")
+        return None
+    best = pick_offer(orig)
     if not best:
         return None
     available = best["days"] <= 1 and best["qty"] > 0  # є сьогодні / на складі
@@ -109,10 +192,10 @@ def _autonova_code_best(code, brand_id, cookie):
 
 
 def pick_offer(cand):
-    """ПРАВИЛО (власник, 24.07): з-поміж пропозицій обирає з НАЙМЕНШИМ терміном
-    постачання; серед однаково швидких — найдешевшу. Ціна береться САМЕ з цієї
-    пропозиції, бо доставку реально виконуватимемо через найшвидшого постачальника
-    (дешева-але-повільна пропозиція нас не рятує). cand: [{price,qty,days,own}]."""
+    """Серед пропозицій ОРИГІНАЛУ (аналоги вже відсіяні у _autonova_code_best) обирає
+    з НАЙМЕНШИМ терміном постачання; серед однаково швидких — найдешевшу. Оскільки
+    наявна пропозиція має days<=1, вона автоматично випереджає «під замовлення».
+    cand: [{price,qty,days,own}]."""
     if not cand:
         return None
     return min(cand, key=lambda c: (c["days"], c["price"]))
@@ -203,13 +286,8 @@ def _resolve_autonova(code, cookie, all_brands):
                 if r2:
                     res = [r2]
                     break
-            base_rev = re.sub(r"[A-Za-z]$", "", sp[0]) if sp else ""
-            if base_rev and len(base_rev) >= 6 and base_rev != sp[0]:
-                r3 = _autonova_code_best(base_rev, bid, cookie)
-                time.sleep(0.12)
-                if r3:
-                    res = [r3]
-                    break
+            # base_rev-фолбек (зрізання кінцевої літери ревізії) ПРИБРАНО 24.07:
+            # це ІНШИЙ номер (інша ревізія/деталь) -> порушує правило «тільки оригінал».
     if not res:
         return None
     cost = sum(r["cost"] for r in res)
@@ -245,19 +323,24 @@ def pull_autonova_web(codes, best, instock, cookie):
     print(f"[autonova-web] додано {n_ok} кодів (у наявності: {n_avail}) з {seen} перевірених")
 
 
-def recheck_autonova_faster(codes, best, instock, cookie):
+def recheck_autonova_faster(codes, best, instock, cookie, on_upgrade=None):
     """КРОС-ПЕРЕВІРКА (власник, 24.07): позиції, що ВЖЕ мають постачальника з прайсів
     (BMW/Porsche/Drive/BMParts), але стоять «під замовлення», перевіряємо на autonova.
     Якщо autonova має код ШВИДШЕ (менший термін, зокрема в наявності) — замінюємо
     позицію на autonova (ціна+наявність+термін). «Найшвидший постачальник виграє»
-    вже МІЖ джерелами. Ліміт AUTONOVA_RECHECK_LIMIT (0 = усі)."""
+    вже МІЖ джерелами. Ліміт AUTONOVA_RECHECK_LIMIT (0 = усі).
+
+    Повертає список кодів (UPPER), які були прискорені/оновлені. on_upgrade(k) —
+    необов'язковий колбек одразу після кожного апгрейду (для інкрементального запису
+    в Export, щоб проміжний прогрес зберігся, навіть якщо прогін уб'ють на середині)."""
     if not cookie:
         print("[recheck] нема AUTONOVA_COOKIE — крос-перевірку пропущено")
-        return
+        return []
     if not autonova_web_authorized(cookie):
-        return
+        return []
     limit = int(num(os.environ.get("AUTONOVA_RECHECK_LIMIT") or 0))  # 0 = усі
     all_brands = _all_brands()
+    upgraded = []
     n_check = n_up = n_avail = 0
     for code in codes:
         if limit and n_check >= limit:
@@ -268,7 +351,11 @@ def recheck_autonova_faster(codes, best, instock, cookie):
         if not cur:
             continue
         cur_days = int(num(cur.get("days"))) if cur.get("days") is not None else 15
-        item = _resolve_autonova(code, cookie, all_brands)
+        try:
+            item = _resolve_autonova(code, cookie, all_brands)
+        except Exception as e:  # одна погана позиція не має валити всю крос-перевірку
+            print(f"[recheck] {k}: {type(e).__name__}: {str(e)[:80]}")
+            continue
         if not item:
             continue
         new_days = int(item.get("days") or 0)
@@ -281,4 +368,11 @@ def recheck_autonova_faster(codes, best, instock, cookie):
             else:
                 instock.pop(k, None)
             n_up += 1
+            upgraded.append(k)
+            if on_upgrade:
+                try:
+                    on_upgrade(k)
+                except Exception as e:
+                    print(f"[recheck] запис {k} не вдався: {str(e)[:80]}")
     print(f"[recheck] autonova крос-перевірка: {n_check} перевірено, {n_up} прискорено (у наявності: {n_avail})")
+    return upgraded
