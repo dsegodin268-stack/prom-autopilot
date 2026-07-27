@@ -9,15 +9,17 @@ import re
 from common.bmparts_client import (cdn_url, clean_name, fitment_lines, oem_and_replacements,
                                    parse_details)
 from common.pricing import final_price
+from repricing.export_writer import avail_cell
 from adding.ai_layer import ai_enrich, merge_ai
 from adding.groups import map_group
 
 SELLER = "Vision Dynamics, Київ"
+CITY = "Київ"
 
-SUPPLIERS = {
-    "BMW": "1KXaDLqBsOAtX0MxUoX39jpia9boISxl1xUxPihhU77I",
-    "PORSCHE": "1oVSVg1cBxGj-DA66c5_FoAtp6zOthdnF_xTY_ugez2g",
-}
+# SUPPLIERS + supplier_articles() видалено 26.07: вони вміли дістати з прайсу лише
+# артикули, без цін і наявності, і не мали жодного виклику. Прайси постачальників
+# тепер читає adding/sources/supplier_book.py через той самий read_all_tabs(),
+# що й нічний репрайсер, — отже правила наявності й «найдешевша перемагає» одні.
 
 UA2RU = {
     "гальмівні": "тормозные", "гальмівний": "тормозной", "гальмівна": "тормозная", "колодки": "колодки",
@@ -125,11 +127,10 @@ def _first_word(s):
     return (m.group(0).lower() if m else "")
 
 
-def _spaced_oem(a):
-    d = re.sub(r"\D", "", str(a or ""))
-    if len(d) == 11:
-        return f"{d[:2]} {d[2:4]} {d[4]} {d[5:8]} {d[8:]}"
-    return ""
+# _spaced_oem() видалено 26.07 за прямою вказівкою власника: номер BMW ніколи не
+# пишеться через пробіли чи дефіси — ні в каталозі, ні в пошуку. Було
+# «11 42 7 953 129», має бути «11427953129». Функція додавала розбитий варіант
+# у ключові запити, тобто вчила Prom шукати те, чого ніхто не набирає.
 
 
 def _name_for_prom(raw, art):
@@ -232,9 +233,6 @@ def gen_keywords(product, lang):
         if typ_l:
             add(f"{typ_l} {carbrand} {m}")
     add(art)
-    sp = _spaced_oem(art)
-    if sp:
-        add(sp)
     for o in oem[:5]:
         add(o)
     for r in repl[:5]:
@@ -245,30 +243,44 @@ def gen_keywords(product, lang):
         add(f"{typ_l} {orig}")
     if carbrand:
         add(f"{zap} {carbrand}", f"{carbrand} {orig}")
-    add("Київ" if lang != "ru" else "Киев", "Україна" if lang != "ru" else "Украина")
+    # Голі «Київ» і «Україна» прибрано 26.07: Prom зіставляє запит із ЦІЛОЮ
+    # фразою зі списку, а не з окремими словами в різних фразах. Слово «Київ»
+    # саме по собі не ловить нічого, зате з'їдає слот. Локальний запит ловиться
+    # лише повною фразою — її й додаємо, і тільки одну.
+    if typ_l and carbrand:
+        add(f"{typ_l} {carbrand} {'Киев' if lang == 'ru' else CITY}")
     return kws[:32]
 
 
 # ---------- Мета ----------
 def meta_title(product, lang):
+    """HTML-заголовок ≤120. Каталожний номер має бути в ньому ЗАВЖДИ.
+
+    Було: (назва + номер + « купити Київ. Vision Dynamics»)[:120] — у довгих
+    назв хвіст із назвою магазину виштовхував номер за межу зрізу, і позиція
+    переставала знаходитись за каталожним номером. Тепер місце під номер
+    резервується першим, а хвіст додається лише якщо він поміщається цілим."""
     name = product.get("name") or ""
-    art = product.get("article") or ""
-    t = re.sub(r"\s+", " ", (ua2ru(name) if lang == "ru" else name)).strip()
-    if art and art not in t:
-        t = f"{t} {art}"
+    art = str(product.get("article") or "").strip()
+    core = re.sub(r"\s+", " ", (ua2ru(name) if lang == "ru" else name)).strip()
+    art_part = f" {art}" if art and art.lower() not in core.lower() else ""
+    core = core[:120 - len(art_part)].strip()
+    t = core + art_part
     tail = " купить Киев. Vision Dynamics" if lang == "ru" else " купити Київ. Vision Dynamics"
-    return (t + tail)[:120]
+    return (t + tail) if len(t) + len(tail) <= 120 else t
 
 
 def meta_desc(product, lang):
+    """HTML-опис ≤250. OEM-номер так само не має зрізатися хвостом."""
     name = product.get("name") or ""
     oem, _ = oem_and_replacements(product)
-    base = ua2ru(name) if lang == "ru" else name
+    base = re.sub(r"\s+", " ", (ua2ru(name) if lang == "ru" else name)).strip()
     o = (f" OEM {oem[0]}." if oem else "")
     tail = (" Оригинал и аналоги, отправка ежедневно по Украине. Vision Dynamics, Киев."
             if lang == "ru" else
             " Оригінал і аналоги, відправка щодня по Україні. Vision Dynamics, Київ.")
-    return (base + o + tail)[:250]
+    s = base[:250 - len(o)].strip() + o
+    return (s + tail) if len(s) + len(tail) <= 250 else s
 
 
 def gtin_from(product):
@@ -279,17 +291,60 @@ def gtin_from(product):
     return ""
 
 
+# ---------- Кандидат -> формат BM Parts ----------
+def product_from_candidate(c):
+    """candidate() -> словник у формі product BM Parts.
+
+    Увесь двигун картки написаний під формат BM Parts. Для позиції з прайсу
+    постачальника дешевше і безпечніше привести кандидата до цього формату,
+    ніж заводити другу гілку коду, яка неминуче розійдеться з першою."""
+    prod = dict(c.get("bm_product") or {})
+    prod.setdefault("article", c.get("article"))
+    if not prod.get("name"):
+        prod["name"] = c.get("name_src") or ""
+    if not prod.get("brand"):
+        prod["brand"] = c.get("brand") or ""
+    if not prod.get("images") and c.get("photos"):
+        prod["images"] = list(c["photos"])
+    if not prod.get("oe") and c.get("oem"):
+        prod["oe"] = [{"number": o, "is_oem": True} for o in c["oem"]]
+    if not prod.get("cars") and c.get("fitment"):
+        prod["cars"] = list(c["fitment"])
+    if not prod.get("nodes") and c.get("group_hint"):
+        prod["nodes"] = c["group_hint"]
+    # ціна тут — СОБІВАРТІСТЬ того постачальника, у якого купуємо цю позицію
+    prod["price"] = c.get("cost")
+    return prod
+
+
 # ---------- Складання повного набору полів ----------
-def build_fields(product):
-    art = str(product.get("article") or "").strip()
+def build_fields(product, cand=None, use_ai=True):
+    """product (+ кандидат) -> усі поля картки Prom.
+
+    cand потрібен для двох речей, які НЕ можна брати з каталогу BM Parts:
+      • собівартість — від постачальника, у якого купуємо;
+      • наявність і кількість — так само від нього, за тим самим правилом
+        avail_cell(), що й у нічного репрайсера, інакше перший же нічний прогін
+        перепише щойно додану картку і власник побачить стрибок.
+    Раніше тут стояло жорстке «Наявність»: «+» — тобто кожна нова позиція
+    оголошувалась наявною, навіть якщо вона під замовлення."""
+    art = str(product.get("article") or (cand or {}).get("article") or "").strip()
     name_ua = _name_for_prom(product.get("name"), art)
     name_ru = _name_for_prom(ua2ru(product.get("name") or ""), art)
     imgs = [cdn_url(p) for p in (product.get("images") or [])]
-    details = clean_details(product)
+    if not imgs and cand:
+        imgs = [cdn_url(p) for p in (cand.get("photos") or [])]
+    details = clean_details(product) or list((cand or {}).get("chars") or [])
     w = product.get("weight")
     if w and not any(n.lower() in ("вага", "вес") for (n, _, _) in details):
         details = [("Вага", "кг", str(w).replace(",", "."))] + details
-    price = final_price(product.get("price")) or ""
+    cost = (cand or {}).get("cost") if cand else product.get("price")
+    price = final_price(cost) or ""
+    qty = (cand or {}).get("qty") or 0
+    days = (cand or {}).get("days") if cand else 0
+    if cand and cand.get("presence") != "available":
+        qty = 0
+    avail, qty_cell = avail_cell(qty, days if cand else 15)
     gid, gname = map_group(product)
     f = {"Код_товару": art, "Ідентифікатор_товару": art,
          "Назва_позиції": name_ru or name_ua, "Назва_позиції_укр": name_ua,
@@ -298,45 +353,21 @@ def build_fields(product):
          "Опис": html_desc(product, "ru"), "Опис_укр": html_desc(product, "ua"),
          "HTML_заголовок": meta_title(product, "ru"), "HTML_заголовок_укр": meta_title(product, "ua"),
          "HTML_опис": meta_desc(product, "ru"), "HTML_опис_укр": meta_desc(product, "ua"),
-         "Ціна": price, "Валюта": "UAH", "Одиниця_виміру": "шт.", "Наявність": "+",
+         "Ціна": price, "Валюта": "UAH", "Одиниця_виміру": "шт.",
+         "Наявність": avail, "Кількість": qty_cell,
          "Номер_групи": gid, "Назва_групи": gname,
-         "Виробник": product.get("brand") or "", "Посилання_зображення": ", ".join(imgs)}
+         "Виробник": product.get("brand") or (cand or {}).get("brand") or "",
+         "Посилання_зображення": ", ".join(imgs)}
     if w:
         f["Вага,кг"] = str(w).replace(",", ".")
     gt = gtin_from(product)
     if gt:
         f["Код_маркування_(GTIN)"] = gt
-    ai = ai_enrich(product, clean_details, _fitment)  # без ключа/помилка -> None -> детермінік
-    if ai:
-        merge_ai(f, ai)
+    if use_ai:
+        # thin=True — позиції, якої нема в каталозі BM Parts: фактів обмаль,
+        # тому профіль ШІ прямо забороняє вигадувати кузови, двигуни й роки
+        thin = bool(cand) and not cand.get("matched_bm")
+        ai = ai_enrich(product, clean_details, _fitment, thin=thin)  # без ключа -> None -> детермінік
+        if ai:
+            merge_ai(f, ai)
     return f, name_ua, imgs, details, price
-
-
-def supplier_articles(gc, supplier):
-    """Унікальні артикули з прайс-книги постачальника (BMW/PORSCHE) — кандидати."""
-    sid = SUPPLIERS.get(supplier.upper())
-    if not sid:
-        print(f"[src] невідомий постачальник {supplier}")
-        return []
-    out = []
-    seen = set()
-    try:
-        ss = gc.open_by_key(sid)
-    except Exception as e:
-        print(f"[src] {supplier}: нема доступу {str(e)[:60]}")
-        return []
-    for ws in ss.worksheets():
-        try:
-            vals = ws.get_all_values()
-        except Exception:
-            continue
-        for r in vals:
-            a = (r[0] if r else "").strip()
-            if not a or not re.search(r"\d", a) or len(a) < 4:
-                continue
-            u = a.upper()
-            if u not in seen:
-                seen.add(u)
-                out.append(a)
-    print(f"[src] {supplier}: {len(out)} унікальних артикулів")
-    return out

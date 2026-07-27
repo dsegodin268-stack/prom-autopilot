@@ -42,9 +42,27 @@ GROUPS = [
 ]
 
 
+def _text(v):
+    """nodes у BM Parts буває і рядком, і списком, і списком словників.
+    Раніше тут було просто конкатенування рядків — на живих даних це падало
+    з TypeError і картка гинула в except усього прогону."""
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict):
+        return " ".join(_text(x) for x in v.values())
+    if isinstance(v, (list, tuple, set)):
+        return " ".join(_text(x) for x in v)
+    return str(v)
+
+
 def map_group(product):
-    """(Номер_групи, Назва_групи) або ('','') якщо тип невпізнаний."""
-    hay = ((product.get("nodes") or "") + " " + (product.get("name") or "")).lower()
+    """(Номер_групи, Назва_групи) або ('','') якщо тип невпізнаний.
+
+    Порожня група — це НЕ помилка, а сигнал власнику докурувати вручну:
+    вигадувати ID групи Prom не можна, бо неіснуючий номер зламає імпорт."""
+    hay = (_text(product.get("nodes")) + " " + _text(product.get("name"))).lower()
     for kws, gid, gname in GROUPS:
         if all(k in hay for k in kws):
             return gid, gname

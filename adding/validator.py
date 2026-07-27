@@ -2,6 +2,7 @@
 # Валідатор картки за ПРАВИЛА_PROM.md. Token-free, без API-викликів.
 # CRITICAL — Prom відхилить при імпорті; WARN — пройде, але якість під питанням.
 # 2026-07-24: підключений у конвеєр додавання (adding/run.py) — CRITICAL не пишеться в Export.
+# 2026-07-26: validate_card() знає про рівень повноти — див. пояснення в самій функції.
 import re
 
 CRITICAL = "CRITICAL"
@@ -102,9 +103,20 @@ def validate_images(urls):
     return out
 
 
-def validate_card(card, is_part=True):
+def validate_card(card, is_part=True, level=1):
     """card: dict(name, description, chars, images, price, group_id, product_id).
-    Повертає список (field, level, code, message)."""
+    Повертає список (field, level, code, message).
+
+    level — рівень повноти з adding/completeness.py (1 повна / 2 без дрібниць /
+    3 нема фото). Рівень 3 за визначенням їде в Staging_Prom зі статусом
+    «чекає фото»: там брак фото — це ОЧІКУВАНИЙ стан, а не помилка. Якби
+    img_none лишався CRITICAL, конвеєр відхиляв би картку ще ДО маршрутизації,
+    і позиція не потрапляла б узагалі нікуди — ні в Export, ні в чернетку.
+    Тому на рівні 3 (і лише для img_none) прапорець знижується до WARN.
+    Усі інші CRITICAL — назва з «-», порожній опис, нема ідентифікатора —
+    валять картку як і раніше, однаково для Export і для Staging.
+    А в Export картка без фото не потрапляє ніколи: route() у completeness.py
+    відправляє рівень 3 у Staging безумовно."""
     flags = []
     for f in validate_name(card.get("name")):
         flags.append(("name",) + f)
@@ -115,8 +127,10 @@ def validate_card(card, is_part=True):
             flags.append(("part",) + f)
     for f in validate_characteristics(card.get("chars")):
         flags.append(("char",) + f)
-    for f in validate_images(card.get("images")):
-        flags.append(("img",) + f)
+    for lvl, code, msg in validate_images(card.get("images")):
+        if level == 3 and code == "img_none":
+            lvl, msg = WARN, "Нема фото — картка йде в чернетку зі статусом «чекає фото»"
+        flags.append(("img", lvl, code, msg))
     if not card.get("product_id"):
         flags.append(("req", CRITICAL, "id_empty", "Нема Ідентифікатор_товару"))
     if card.get("price") in (None, "", 0, "0"):
