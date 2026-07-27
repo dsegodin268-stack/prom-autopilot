@@ -21,6 +21,7 @@ from common.config import EXPORT_TAB, ID_HUB, LIVE, REVIEW_TAB, SRC_BMPARTS, STA
 from common.normalize import num
 from common.prom_format import write_chars
 from common.sheets import find_ws, keyf, open_hub
+from adding.ai_layer import audit_card, audit_line
 from adding.card_builder import build_fields, product_from_candidate
 from adding.completeness import level, route
 from adding.panel import ensure_panel, read_panel, write_status
@@ -150,9 +151,15 @@ def do_enrich(sh, st):
             # провину лише як WARN, бо вона й так їде в чернетку «чекає фото».
             # Інакше валідатор відхиляв би її тут і позиція гинула б мовчки.
             lv = level(c)
+            # meta_title / meta_desc / keywords додано 27.07: без них валідатор
+            # не бачив половини чекліста §10 — довжину мета-полів, кількість
+            # ключовиків, наявність каталожного номера в меті.
             card = {"name": f.get("Назва_позиції_укр"), "description": f.get("Опис_укр"),
                     "chars": details, "images": imgs, "price": price,
-                    "product_id": art, "group_id": f.get("Номер_групи")}
+                    "product_id": art, "group_id": f.get("Номер_групи"),
+                    "meta_title": f.get("HTML_заголовок_укр"),
+                    "meta_desc": f.get("HTML_опис_укр"),
+                    "keywords": f.get("Пошукові_запити_укр")}
             flags = validate_card(card, is_part=True, level=lv)
             verdict = summarize(flags)
             if worst_level(flags) == CRITICAL:
@@ -160,19 +167,39 @@ def do_enrich(sh, st):
                 print(f"[add] ⛔ {art}: {verdict}")
                 continue
 
+            # --- ДРУГА ДУМКА ШІ (дорадча, ПРАВИЛА §10 + Google) ---
+            # Іде ПІСЛЯ валідатора і лише для карток, які вже пройшли: на
+            # відхиленій витрачати добову квоту немає сенсу. Результат ніде далі
+            # не читається, крім рядка статусу, — маршрут «Export чи Staging»
+            # рахує код. Нема ключів / вичерпано квоту / провайдер мовчить ->
+            # audit_line порожній, і конвеєр працює точно так само, як досі.
+            ai_note = audit_line(audit_card(f, chars=details, images=imgs,
+                                            article=art, group=f.get("Номер_групи"),
+                                            use_ai=use_ai))
+
             dest, status = route(c, st["target"])
             # Запобіжник: навіть якщо рівень порахувався оптимістично, картка
             # без жодного фото в бойову таблицю не піде — Prom її відхилить.
             if dest == "export" and not imgs:
                 dest, status = "staging", "чекає фото"
+            # Те саме для групи (27.07). map_group() свідомо повертає '' для
+            # невпізнаного типу — вигадувати номер групи Prom не можна, бо
+            # неіснуючий ID ламає імпорт усього файлу. Але раніше така картка
+            # усе одно їхала в Export із порожньою групою: наприклад масляний
+            # фільтр, якого просто нема в сіді GROUPS. Тепер вона чекає, поки
+            # власник обере групу руками.
+            if dest == "export" and not f.get("Номер_групи"):
+                dest, status = "staging", "нема групи — обрати вручну"
             row = _row_from_fields(ex_head, f, details)
             (to_export if dest == "export" else to_staging).append(row)
             seen.add(k)
             mark[rn] = (f"{status} → {'Export' if dest == 'export' else 'Staging'}"
-                        + ("" if verdict == "OK" else f" ({verdict[:60]})"))
+                        + ("" if verdict == "OK" else f" ({verdict[:60]})")
+                        + (f" | {ai_note[:120]}" if ai_note else ""))
             print(f"[add] ✅ {art} | рівень {lv} | {name_ua[:38]} | ціна {price} | "
                   f"наяв {f.get('Наявність','')} к-ть {f.get('Кількість','')} | "
-                  f"х-к {len(details)} | фото {len(imgs)} | -> {dest} | {verdict}")
+                  f"х-к {len(details)} | фото {len(imgs)} | -> {dest} | {verdict}"
+                  + (f" | {ai_note}" if ai_note else ""))
         except Exception as e:
             mark[rn] = "помилка"
             print(f"[add] {art}: ПОМИЛКА {e}")

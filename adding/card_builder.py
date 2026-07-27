@@ -51,8 +51,13 @@ def esc(s):
 PROM_UNITS = {"шт.", "шт", "т", "кг", "г", "куб.м", "л", "кв.м", "кв.см", "м", "км", "мм", "мл",
               "пара", "упаковка", "комплект", "набір", "рулон", "послуга", "см"}
 _DROP_VAL = {"", "-", "–", "—", "n/a", "na", "нет", "немає", "none", "0", "0.0", "0,0"}
+# «артикул» і «гарант» прибрано зі списку викидання 27.07: ПРАВИЛА §5 перелічують
+# «Артикул» і «Гарантія» серед ОБОВ'ЯЗКОВИХ характеристик, а цей фільтр їх мовчки
+# зрізав — картка їхала в Prom без двох обов'язкових полів. «Код виробника» та
+# штрихкод лишаються у викиданні: перший дублює артикул, другий іде окремим
+# полем GTIN.
 _DROP_NAME = ("країна реєстрації", "страна регистрац", "код виробник", "код производ",
-              "штрих", "гарант", "артикул", "svhc")
+              "штрих", "svhc")
 
 
 def clean_details(product):
@@ -96,7 +101,12 @@ def _type_phrase(name):
 
 
 def _car_tokens(name):
-    return re.findall(r"[A-Za-z][A-Za-z0-9]+", name or "")
+    """Коди кузовів/двигунів із назви: G20, B48, X3...
+
+    (?<![A-Za-z0-9]) — 27.07. Без цього погляду назад регулярка виловлювала «x36»
+    усередині розміру диска «348x36» і видавала ключовик «BMW x36», якого не існує.
+    Токен зараховується, лише якщо перед латинською літерою НЕ стоїть буква чи цифра."""
+    return re.findall(r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]+", name or "")
 
 
 def _humanize_years(s):
@@ -117,8 +127,14 @@ def _fit_from_name(name):
 
 
 def _fitment(product, name):
+    """Рядки сумісності. Роки олюднюються ЗАВЖДИ.
+
+    27.07: _humanize_years() стояв тільки в запасній гілці _fit_from_name(), тому
+    сумісність із каталогу BM Parts їхала в опис як «BMW 3 G20 B48 18-» замість
+    «BMW 3 G20 B48 2018+». Покупець читає роки, а не скорочення постачальника."""
     brand = (product.get("brand") or "").strip().lower()
-    fit = [f for f in fitment_lines(product) if f and f.strip().lower() != brand]
+    fit = [_humanize_years(f) for f in fitment_lines(product)
+           if f and f.strip().lower() != brand]
     return fit or _fit_from_name(name)
 
 
@@ -133,9 +149,19 @@ def _first_word(s):
 # у ключові запити, тобто вчила Prom шукати те, чого ніхто не набирає.
 
 
-def _name_for_prom(raw, art):
+def _display_name(raw):
+    """Чиста назва без хвоста-скорочення постачальника («... 348x36 18-» → «... 348x36»).
+
+    27.07: раніше це чищення жило всередині _name_for_prom(), тому чисту назву
+    бачила лише колонка «Назва_позиції», а опис, мета-заголовок і мета-опис
+    брали СИРУ назву з висячим «11-». Один товар мав три різні написання
+    заголовка в одній картці. Тепер усі чотири місця беруть один рядок."""
     n = clean_name(raw)
-    n = re.sub(r"\s*\b\d{2}(\s+\d{2})?\s*$", "", n).strip()
+    return re.sub(r"\s*\b\d{2}\s*-?\s*(\d{2})?\s*$", "", n).strip()
+
+
+def _name_for_prom(raw, art):
+    n = _display_name(raw)
     if art and art.lower() not in n.lower():
         n = f"{n} {art}"
     return clean_name(n)[:110]
@@ -143,14 +169,15 @@ def _name_for_prom(raw, art):
 
 # ---------- Опис (ПРАВИЛА §3a) ----------
 def html_desc(product, lang):
-    name = (product.get("name") or "").strip().rstrip(".")
+    name = _display_name(product.get("name")).rstrip(".")
     oem, repl = oem_and_replacements(product)
     details = clean_details(product)
     if lang == "ru":
         nm = ua2ru(name)
         L = {"q": "оригинальное качество для вашего авто",
              "fit": "Прямая замена изношенного узла, возвращает штатную работу.",
-             "oem": "Оригинальный (OEM) номер", "rep": "Аналоги / замена", "ch": "Характеристики",
+             "oem": "Оригинальный (OEM) номер", "art": "Каталожный номер",
+             "rep": "Аналоги / замена", "ch": "Характеристики",
              "ship": "Отправка ежедневно по Украине. Гарантия соответствия.",
              "cta": "Не уверены, подойдёт ли именно на ваше авто? <strong>Мы подберём за вас</strong> — "
                     "напишите марку, модель, год и VIN-код."}
@@ -158,7 +185,8 @@ def html_desc(product, lang):
         nm = name
         L = {"q": "оригінальна якість для вашого авто",
              "fit": "Пряма заміна зношеного вузла, відновлює штатну роботу.",
-             "oem": "Оригінальний (OEM) номер", "rep": "Аналоги / замінники", "ch": "Характеристики",
+             "oem": "Оригінальний (OEM) номер", "art": "Каталожний номер",
+             "rep": "Аналоги / замінники", "ch": "Характеристики",
              "ship": "Відправка щодня по Україні. Гарантія відповідності.",
              "cta": "Не впевнені, чи підійде саме на ваше авто? <strong>Ми підберемо за вас</strong> — "
                     "напишіть марку, модель, рік і VIN-код."}
@@ -171,11 +199,23 @@ def html_desc(product, lang):
         p.append(f"<p>\U0001F50E <strong>{lab}:</strong> {esc(', '.join(fitc))}.</p>")
     if oem:
         p.append(f"<p>\U0001F527 <strong>{L['oem']}:</strong> {esc(', '.join(oem))}.</p>")
+    else:
+        # 27.07. Позиція з прайсу, якої нема в довіднику BM Parts, не має жодного
+        # OEM — і в описі не лишалось ЖОДНОГО номера. Головне правило власника:
+        # покупець мусить знайти позицію за каталожним номером, а Google індексує
+        # саме текст опису. Артикул тут — і є той номер, іншого в нас нема.
+        art = re.sub(r"\s+", "", str(product.get("article") or ""))
+        if art:
+            p.append(f"<p>\U0001F527 <strong>{L['art']}:</strong> {esc(art)}.</p>")
     if repl:
         p.append(f"<p>\U0001F501 <strong>{L['rep']}:</strong> {esc(', '.join(repl[:12]))}.</p>")
+    # [:4], а не [:8] — 27.07. ПРАВИЛА §3: опис НЕ дублює блок характеристик Prom
+    # (той самий набір уже стоїть у колонках Назва/Одиниця/Значення), дозволено
+    # лише 2-4 підсумкові пункти. Раніше сюди виводилось до 8 рядків — покупець
+    # бачив однакову таблицю двічі, а Google рахував це за дубль контенту.
     if details:
         lis = "".join(f"<li>{esc(ua2ru(n) if lang == 'ru' else n)}: {esc(v)}{(' ' + esc(u)) if u else ''}</li>"
-                      for (n, u, v) in details[:8])
+                      for (n, u, v) in details[:4])
         p.append(f"<p>\U0001F4CB <strong>{L['ch']}:</strong></p><ul>{lis}</ul>")
     p.append(f"<p>\U0001F4E6 {L['ship']}</p>")
     p.append(f"<p>❓ {L['cta']}</p>")
@@ -198,6 +238,43 @@ TYPE_SYNONYMS = {
     "килимки": ["коврики"],
     "радіатор": ["радіатор охолодження"],
 }
+
+
+_KW_BAD = ("купити", "купить", "продати", "оптом", "замовити", "заказать",
+           "недорого", "дешево", "запчастини", "запчасти")
+
+
+def _part_token(s):
+    """Каталожний номер із рядка замінника.
+
+    27.07. Було `r.split()[-1]`: рядок «11427854445 (BMW)» перетворювався на
+    ключовик «(BMW)» — сміття, яке ніхто не шукає, а справжній альтернативний
+    номер 11427854445 у список не потрапляв узагалі. Тепер дужки зрізаються,
+    а з решти береться токен із цифрами — саме він і є номером
+    («MANN HU6004X» → HU6004X, «11427854445 (BMW)» → 11427854445)."""
+    s = re.sub(r"\([^)]*\)", " ", str(s or ""))
+    toks = [t.strip(".,;") for t in s.split() if t.strip(".,;")]
+    nums = [t for t in toks if any(ch.isdigit() for ch in t)]
+    return (nums[-1] if nums else (toks[-1] if toks else ""))
+
+
+def _kw_ok(k):
+    """Останній фільтр ключовиків: без заборонених слів і без сміття.
+
+    27.07 додано відсів ОДНОГО СЛОВА БЕЗ ЦИФР. Prom шукає збіг усередині однієї
+    фрази, тому ключовик «BMW» означає «показуй мою картку на кожен запит зі
+    словом BMW»: покупець, який шукає диски, бачить фільтр і йде геть, а сама
+    деталь від цього не знаходиться жодного разу. Те саме з голим «фильтр».
+    Цифри — свідомий виняток: «11427953129» теж одне слово, але це каталожний
+    номер, за яким позицію мусить знаходити пошук. Це пряма вимога власника і
+    вона важливіша за правило про цілі фрази."""
+    k = (k or "").strip()
+    if len(k) < 3 or "(" in k or ")" in k:
+        return False
+    if len(k.split()) == 1 and not re.search(r"\d", k):
+        return False
+    low = k.lower()
+    return not any(b in low for b in _KW_BAD)
 
 
 def gen_keywords(product, lang):
@@ -233,54 +310,112 @@ def gen_keywords(product, lang):
         if typ_l:
             add(f"{typ_l} {carbrand} {m}")
     add(art)
+    if typ_l and art:
+        add(f"{typ_l} {art}")
     for o in oem[:5]:
         add(o)
+        if typ_l:
+            add(f"{typ_l} {o}")
     for r in repl[:5]:
-        add(r.split()[-1] if r else r)
+        add(_part_token(r))
     orig = "оригинал" if lang == "ru" else "оригінал"
-    zap = "запчасти" if lang == "ru" else "запчастини"
     if typ_l:
         add(f"{typ_l} {orig}")
+        if carbrand:
+            add(f"{carbrand} {typ_l}")
     if carbrand:
-        add(f"{zap} {carbrand}", f"{carbrand} {orig}")
-    # Голі «Київ» і «Україна» прибрано 26.07: Prom зіставляє запит із ЦІЛОЮ
-    # фразою зі списку, а не з окремими словами в різних фразах. Слово «Київ»
-    # саме по собі не ловить нічого, зате з'їдає слот. Локальний запит ловиться
-    # лише повною фразою — її й додаємо, і тільки одну.
-    if typ_l and carbrand:
-        add(f"{typ_l} {carbrand} {'Киев' if lang == 'ru' else CITY}")
-    return kws[:32]
+        add(f"{carbrand} {orig}")
+    # 27.07 прибрано два ключовики, які прямо порушували ПРАВИЛА §2:
+    #   «запчастини {бренд}» — §2 забороняє загальні слова («запчастини», «авто»):
+    #      за таким запитом магазин конкурує з усім ринком і не виграє нічого;
+    #   «{тип} {бренд} Київ» — §2 забороняє регіони в пошукових запитах, а §0-bis
+    #      окремо каже не тягнути міста з чужих карток у нашу мету.
+    # Замість них додано реальні фрази з артикулом і OEM — їх справді набирають.
+    return [k for k in kws if _kw_ok(k)][:40]
 
 
 # ---------- Мета ----------
-def meta_title(product, lang):
-    """HTML-заголовок ≤120. Каталожний номер має бути в ньому ЗАВЖДИ.
+META_TITLE_MAX = 70   # ПРАВИЛА §4/§10: Google ріже сніпет приблизно тут
+META_DESC_MAX = 160   # ПРАВИЛА §4/§10
 
-    Було: (назва + номер + « купити Київ. Vision Dynamics»)[:120] — у довгих
-    назв хвіст із назвою магазину виштовхував номер за межу зрізу, і позиція
-    переставала знаходитись за каталожним номером. Тепер місце під номер
-    резервується першим, а хвіст додається лише якщо він поміщається цілим."""
-    name = product.get("name") or ""
+
+def _trim(s, limit):
+    """Обрізає до limit, але по межі слова — щоб не лишався огризок."""
+    s = re.sub(r"\s+", " ", str(s or "")).strip()
+    if len(s) <= limit:
+        return s
+    cut = s[:limit]
+    sp = cut.rfind(" ")
+    return (cut[:sp] if sp > limit * 0.6 else cut).strip(" ,.-")
+
+
+def meta_title(product, lang):
+    """HTML-заголовок ≤70. Каталожний номер має бути в ньому ЗАВЖДИ.
+
+    27.07, дві правки:
+      • ліміт 120 → 70. §4 і чекліст §10 вимагають ≤70, а код мовчки пускав
+        заголовки на 91-96 символів — Google обрізав їх на видачі.
+      • прибрано хвіст « купити Київ. Vision Dynamics». §0-bis прямо каже, що
+        міста і слово «купити» зі знімків чужих карток — заборонені правилами
+        і НЕ копіюються в нашу мету. Хвіст стояв у КОЖНІЙ картці.
+    Місце під номер резервується першим: у довгих назв саме він вилітав за межу
+    зрізу, і позиція переставала знаходитись за каталожним номером."""
+    name = _display_name(product.get("name"))
     art = str(product.get("article") or "").strip()
     core = re.sub(r"\s+", " ", (ua2ru(name) if lang == "ru" else name)).strip()
     art_part = f" {art}" if art and art.lower() not in core.lower() else ""
-    core = core[:120 - len(art_part)].strip()
-    t = core + art_part
-    tail = " купить Киев. Vision Dynamics" if lang == "ru" else " купити Київ. Vision Dynamics"
-    return (t + tail) if len(t) + len(tail) <= 120 else t
+    return (_trim(core, META_TITLE_MAX - len(art_part)) + art_part).strip()
 
 
 def meta_desc(product, lang):
-    """HTML-опис ≤250. OEM-номер так само не має зрізатися хвостом."""
-    name = product.get("name") or ""
+    """HTML-опис ≤160 (було 250). Каталожний номер — обов'язково.
+
+    Було: якщо в товару нема жодного OEM (позиція з прайсу, якої нема в довіднику),
+    у мета-опис не потрапляв ЖОДЕН номер — §0 вимагає протилежного. Тепер за
+    відсутності OEM береться артикул. Місто з хвоста прибрано (§0-bis)."""
+    name = _display_name(product.get("name"))
+    art = str(product.get("article") or "").strip()
     oem, _ = oem_and_replacements(product)
     base = re.sub(r"\s+", " ", (ua2ru(name) if lang == "ru" else name)).strip()
-    o = (f" OEM {oem[0]}." if oem else "")
-    tail = (" Оригинал и аналоги, отправка ежедневно по Украине. Vision Dynamics, Киев."
+    num = (oem[0] if oem else art)
+    o = (f" OEM {num}." if num else "")
+    tail = (" Оригинал и аналоги, отправка ежедневно по Украине."
             if lang == "ru" else
-            " Оригінал і аналоги, відправка щодня по Україні. Vision Dynamics, Київ.")
-    s = base[:250 - len(o)].strip() + o
-    return (s + tail) if len(s) + len(tail) <= 250 else s
+            " Оригінал і аналоги, відправка щодня по Україні.")
+    s = _trim(base, META_DESC_MAX - len(o)) + o
+    return (s + tail) if len(s) + len(tail) <= META_DESC_MAX else s
+
+
+def enforce_limits(f, art=""):
+    """Єдиний шлюз жорстких меж Prom/Google. Працює і для детермініка, і для ШІ.
+
+    Що робить:
+      • мета-заголовок ≤70, мета-опис ≤160 (§4, §10);
+      • каталожний номер присутній в обох мета-полях (§0);
+      • ключовики: без заборонених слів і сміття, не більше 40 (§2, §10).
+    Нічого не «покращує» — лише не пускає за межі. Оцінку якості робить
+    валідатор (adding/validator.py), а не цей шлюз."""
+    art = str(art or "").strip()
+    for k, limit in (("HTML_заголовок", META_TITLE_MAX), ("HTML_заголовок_укр", META_TITLE_MAX),
+                     ("HTML_опис", META_DESC_MAX), ("HTML_опис_укр", META_DESC_MAX)):
+        v = str(f.get(k) or "")
+        if not v:
+            continue
+        if art and art.lower() not in v.lower():
+            v = f"{_trim(v, limit - len(art) - 1)} {art}"
+        f[k] = _trim(v, limit)
+    for k in ("Пошукові_запити", "Пошукові_запити_укр"):
+        v = str(f.get(k) or "")
+        if not v:
+            continue
+        kws, seen = [], set()
+        for x in v.split(","):
+            x = re.sub(r"\s+", " ", x).strip()
+            if _kw_ok(x) and x.lower() not in seen:
+                seen.add(x.lower())
+                kws.append(x)
+        f[k] = ", ".join(kws[:40])
+    return f
 
 
 def gtin_from(product):
@@ -370,4 +505,9 @@ def build_fields(product, cand=None, use_ai=True):
         ai = ai_enrich(product, clean_details, _fitment, thin=thin)  # без ключа -> None -> детермінік
         if ai:
             merge_ai(f, ai)
+    # Жорсткі межі ставляться ПІСЛЯ ШІ, а не до нього. Раніше текст від провайдера
+    # їхав у Export як є: мета-заголовок на 200 символів чи «купити» в ключовиках
+    # ніхто не ловив, бо детермінований генератор таких не робить, а перевірка
+    # стояла до злиття. Тепер один і той самий шлюз проходять обидва джерела тексту.
+    enforce_limits(f, art)
     return f, name_ua, imgs, details, price
