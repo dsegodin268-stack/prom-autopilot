@@ -75,6 +75,29 @@ def test_price_and_cost_never_reach_the_provider(monkeypatch):
     assert "34116792217" in payload and "Пошукові_запити_укр" in payload
 
 
+def test_whole_card_goes_to_the_audit_not_just_the_texts(monkeypatch):
+    """Вимога власника: «ШІ повинен УСЕ перевіряти». Доти на аудит їхало 10
+    текстових полів, а решта картки лишалась невидимою — і найдорожчі помилки
+    саме там: назва каже «фільтр масляний», а група — «гальмівні диски»; у назві
+    один артикул, а в адресі фото інший; вага 0,01 кг у гальмівного диска.
+    Фото раніше йшли ЧИСЛОМ: за «3» неможливо помітити, що всі три знімки ведуть
+    на чужу деталь."""
+    seen = _spy(monkeypatch, '{"verdict":"ok","score":90,"issues":[]}')
+    f = _card()
+    f.update({"Назва_групи": "Тормозные диски", "Виробник": "BMW",
+              "Код_маркування_(GTIN)": "4006381333931", "Вага,кг": "8.4",
+              "Посилання_зображення": "https://cdn.bm.parts/34116792217_1.jpg"})
+    audit_card(f, chars=[("Виробник", "", "BMW")], article="34116792217")
+    payload = seen[0][1]
+    for token in ("Тормозные диски", "4006381333931", "8.4",
+                  "cdn.bm.parts/34116792217_1.jpg"):
+        assert token in payload, token
+    # і межа лишилась там, де була: гроші й запаси магазину назовні не йдуть
+    for forbidden in ("2400", "1580", "Ціна", "Собівартість", "Валюта",
+                      "Наявність", "Кількість"):
+        assert forbidden not in payload, forbidden
+
+
 def test_audit_never_mutates_the_card(monkeypatch):
     """ШІ не має права правити картку: правку нікому було б перевірити."""
     _spy(monkeypatch, '{"verdict":"fix","issues":[{"field":"назва","why":"довга"}],'
