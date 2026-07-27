@@ -336,3 +336,68 @@ def test_pipeline_publishes_even_when_ai_says_fix(monkeypatch):
     rows = rv.get_all_values()
     i_st = rows[0].index("Статус")
     assert any("ШІ:" in r[i_st] for r in rows[1:])
+
+
+# ------------------------------------------------- МОВЧАННЯ МУСИТЬ БУТИ ВИДНО ---
+# Прогін №18: у журналі жодного рядка «[ai]», у «Статусі» жодного зауваження.
+# Читалося як «ШІ перевірив, усе добре». Насправді ШІ не перевіряв нічого — не
+# було ключа в жодного з 12 провайдерів. Мовчання неможливо було відрізнити від
+# схвалення, і саме це тут закривається.
+
+def test_providers_ready_is_empty_without_any_key(monkeypatch):
+    from adding.ai_layer import ORDER, PROVIDERS, providers_ready
+    monkeypatch.delenv("AI_PROVIDERS", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("AI_TOKEN", raising=False)
+    for prov in ORDER:
+        if prov in PROVIDERS:
+            monkeypatch.delenv(PROVIDERS[prov][1], raising=False)
+    assert providers_ready() == []
+
+
+def test_providers_ready_names_the_key_that_exists(monkeypatch):
+    from adding.ai_layer import PROVIDERS, providers_ready
+    monkeypatch.setenv("AI_PROVIDERS", "groq")
+    monkeypatch.setenv(PROVIDERS["groq"][1], "x" * 20)
+    assert providers_ready() == ["groq"]
+
+
+def test_the_owner_is_told_when_the_ai_never_ran(monkeypatch, capsys):
+    """Без ключів конвеєр працює далі — картки складає код, — але в кожному
+    рядку статусу і в журналі має бути сказано прямо: ШІ не дивився."""
+    from adding.panel import ensure_panel, read_panel
+    from adding.review import C_TAKE, do_review
+    import adding.review as review
+    import adding.run as run
+    from adding.ai_layer import ORDER, PROVIDERS
+    from common.config import EXPORT_TAB, PANEL_TAB, REVIEW_TAB
+    from tests.fakes import FakeBM, FakeSpreadsheet
+    from tests.test_pipeline_dry import EX_HEAD, PANEL_SEED
+
+    monkeypatch.delenv("AI_PROVIDERS", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("AI_TOKEN", raising=False)
+    for prov in ORDER:
+        if prov in PROVIDERS:
+            monkeypatch.delenv(PROVIDERS[prov][1], raising=False)
+    monkeypatch.setattr(review, "_bm", lambda: FakeBM())
+
+    book = FakeSpreadsheet()
+    book.add_worksheet(EXPORT_TAB, cols=len(EX_HEAD)).update(values=[EX_HEAD], range_name="A1")
+    panel = [list(r) for r in PANEL_SEED]
+    panel[5][1] = "Повний"                       # власник ШІ УВІМКНУВ…
+    book.add_worksheet(PANEL_TAB, cols=3).update(values=panel, range_name="A1")
+
+    ensure_panel(book)
+    st = read_panel(book)
+    do_review(book, st)
+    rv = book.ws(REVIEW_TAB)
+    for r in range(2, len(rv.get_all_values()) + 1):
+        rv._put(r, C_TAKE + 1, "TRUE")
+    run.do_enrich(book, st)
+
+    # …а ключа нема — і про це сказано і в журналі, і в таблиці
+    assert "нема ключа" in capsys.readouterr().out
+    rows = rv.get_all_values()
+    i_st = rows[0].index("Статус")
+    assert all("ШІ не перевіряв" in r[i_st] for r in rows[1:] if r[i_st])

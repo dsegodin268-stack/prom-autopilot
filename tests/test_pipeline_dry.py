@@ -210,6 +210,68 @@ def test_supplier_characteristics_survive_a_real_width_header():
     assert names.index(canon.CH_PART_CODE) < names.index("Діаметр")
 
 
+def test_routing_judges_the_built_card_not_the_raw_candidate(sh, monkeypatch):
+    """ГОЛОВНА РЕГРЕСІЯ ПРОГОНУ №18 (27.07).
+
+    Рівень і маршрут рахувалися з candidate — тобто з того, що прийшло в
+    «Огляд_Додавання» з прайсу постачальника, ДО того, як card_builder зібрав
+    картку. Через це позиція, у якої в підсумку 11 характеристик, фото, справжня
+    група Prom і підрозділ, лягла в чернетку з написом «на перевірку: нема
+    характеристик, сумісності». Обидва твердження були неправдою: у прайсі цього
+    справді не було, а в КАРТЦІ вже було.
+
+    Тест доводить, що судять саме картку: кандидатові тут вибивають з рук усе,
+    що читав старий level() — фото, характеристики, OEM, сумісність і підказку
+    групи, — а картка все одно мусить доїхати в Export."""
+    from adding.panel import read_panel
+    import adding.run as run
+    import adding.sources.lookup as lookup
+
+    real_lookup = lookup.bm_lookup
+
+    def blinding(bm, c, cache=None):
+        """Довідник відпрацював, а потім кандидата «осліпили»: у ньому не
+        лишилось нічого, за чим старий код рахував рівень."""
+        ok = real_lookup(bm, c, cache=cache)
+        c.update(photos=[], chars=[], oem=[], fitment=[], group_hint="")
+        return ok
+
+    monkeypatch.setattr(run, "bm_lookup", blinding)
+
+    _run_review(sh)
+    _take_all(sh)
+    run.do_enrich(sh, read_panel(sh))
+
+    ex = {r[0] for r in sh.ws(EXPORT_TAB).get_all_values()[1:]}
+    assert "34116792217" in ex, (
+        "повна картка знову поїхала в чернетку через сирого кандидата")
+
+
+def test_staging_reason_names_what_is_really_missing(sh):
+    """Друга половина тієї ж регресії: у чернетці має бути написана ПРАВДА.
+
+    У прогоні №18 статус казав «нема характеристик, сумісності» про картку, де
+    і те, і те було. Власник читає цю клітинку щодня і за нею вирішує, що
+    доробляти руками, — брехливий статус коштує його часу."""
+    from adding.panel import read_panel
+    from adding.run import do_enrich
+
+    _run_review(sh)
+    _take_all(sh)
+    do_enrich(sh, read_panel(sh))
+
+    rows = sh.ws(REVIEW_TAB).get_all_values()
+    i_art, i_st = rows[0].index("Артикул"), rows[0].index("Статус")
+    by_art = {r[i_art]: r[i_st] for r in rows[1:]}
+
+    # Помпа водяної групи в Prom нема -> причина саме «група», і жодного слова
+    # про характеристики: їх у картці 10.
+    assert "груп" in by_art["11517586925"]
+    assert "характеристик" not in by_art["11517586925"]
+    # Колодки без фото -> «чекає фото», і теж без вигаданих претензій.
+    assert "фото" in by_art["34116794300"]
+
+
 def test_card_without_the_part_code_waits_in_staging(sh, monkeypatch):
     """ЧЕТВЕРТИЙ запобіжник (27.07). «Код запчастини» — це поле, за яким Prom
     підчіплює крос-довідник, тобто показує позицію тому, хто шукає за номером.
