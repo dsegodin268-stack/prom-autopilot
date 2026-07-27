@@ -9,7 +9,9 @@ BMW/Porsche Sheets  ─┐
 AutoNova (Drive zip) ┼──►  nightly.yml → repricing ────►  Export Products Sheet ──► Prom (фід по URL)
 AutoNova web-API     ┤                                    + Звіт_Ціни (журнал)
 BM Parts API        ─┘     sync_bmparts.yml → mirror ──►  окрема книга «BM Parts»
-                           add.yml → adding ───────────►  Огляд_Додавання → Export
+                           add.yml → adding ───────────►  Пульт_Додавання → Огляд_Додавання
+                                                          → Export (рівень 1)
+                                                          → Staging_Prom (рівні 2-3)
 ```
 
 ## Модулі (1 папка = 1 процес)
@@ -17,31 +19,60 @@ BM Parts API        ─┘     sync_bmparts.yml → mirror ──►  окрем
 | Модуль | Запуск | Що робить |
 |---|---|---|
 | `repricing/` | `python -m repricing.run` (nightly.yml, cron ~08:23 Київ + кнопка в таблиці) | Водоспад собівартості (BMW → Porsche → AutoNova-Drive → BMW-пари → autonova-web → BM Parts) → ціна за тарифом/конкурентом → **якірний захист** → запис Ціна/Наявність/Кількість в Export → «Звіт_Ціни» |
-| `adding/` | `python -m adding.run` (add.yml, вручну) | review: нові коди BM Parts → «Огляд_Додавання»; enrich: відмічені «Взяти» → повна картка за ПРАВИЛА_PROM → **валідатор** → Export |
+| `adding/` | `python -m adding.run` (add.yml, вручну) | Керується з вкладки **«Пульт_Додавання»**. review: кандидати з обраного джерела (BM Parts / прайс BMW / прайс Porsche / усі) → «Огляд_Додавання» з **рівнем повноти**; enrich: відмічені «Взяти» → контент BM Parts → картка за ПРАВИЛА_PROM → **валідатор** → Export (лише рівень 1) або Staging_Prom (рівні 2 і 3) |
 | `bmparts_mirror/` | `python -m bmparts_mirror.run` (sync_bmparts.yml, cron ~07:43) | Дзеркало наявності BM Parts (~125k) в окрему книгу |
 | `competitors/` | вручну (потребує playwright) | Скрапер цін конкурентів з Prom → вкладка `competitors` |
 | `common/` | — | Спільне ядро: **єдине ціноутворення**, нормалізація артикулів, Google-клієнти, клієнт BM Parts |
 | `tools/` | `python -m tools.bmparts_probe` (bmparts_probe.yml) | Проба одного артикула / BULK-прайсу |
-| `tests/` | `pytest tests/` (ci.yml на кожен push) | Тести чистих функцій (нормалізація, ціни, brandId, якір) |
+| `tests/` | `pytest tests/` (ci.yml на кожен push) | 132 тести: нормалізація, ціни, brandId, якір, формат Prom, рівні повноти, валідатор, **сходи ШІ-провайдерів** і **сухий прогін усього конвеєра додавання** на підробках (`tests/fakes.py`, без мережі) |
 
 ## Ключові правила
 
-- **DRY-RUN за замовчуванням**: запис у таблиці лише при `LIVE=1` (repo variable або input `live` у nightly).
+- **ЗАПИС за замовчуванням**: у таблиці пишеться завжди, DRY-RUN лише при ЯВНОМУ `LIVE=0`.
+  До 24.07 було навпаки — і через невиставлену `vars.LIVE` у воркфлоу прилітало `LIVE=""`,
+  тож Export місяцями мовчки не оновлювався, хоча «Звіт_Ціни» писався. Мовчазний DRY-RUN
+  тепер неможливий (`common/config.py`).
 - **Якірний захист** (`repricing/guard.py`): без конкурента/override ціна не пишеться, якщо вона
   нижча 60% якоря (`repricing/data/anchor_prices.csv`) або падає більш ніж на 25%. Утримані — у «Звіт_Ціни».
 - **Валідатор** (`adding/validator.py`): CRITICAL-картки в Export не потрапляють.
+- **Рівні повноти** (`adding/completeness.py`): 1 — повна картка → Export; 2 — бракує дрібниць,
+  але фото є → Staging_Prom; 3 — нема фото → Staging_Prom зі статусом «чекає фото».
+  Фото — межа між 2 і 3, бо Prom відхиляє позицію без зображення. **Картка без фото
+  не потрапляє в Export жодним шляхом.**
+- **Ціна, валюта, наявність і кількість** — ЗАВЖДИ від постачальника, у якого купуємо.
+  BM Parts у конвеєрі додавання — це довідник КОНТЕНТУ (фото, характеристики, OEM, сумісність),
+  а не джерело ціни. Наявність рахує той самий `avail_cell()`, що й нічний репрайсер, —
+  інакше репрайсер наступної ночі перебивав би щойно додану картку.
+- **ШІ не торкається** коду товару, ціни, валюти, наявності, кількості, фото, групи,
+  виробника, GTIN і характеристик (ПРАВИЛА §8). Він переписує рівно 10 текстових полів.
+  У факти, що йдуть до зовнішнього провайдера, **ніколи** не потрапляє ціна чи собівартість.
+- **Сходи ШІ самолікуються за назвами моделей**: кожен провайдер тримає кортеж моделей-кандидатів,
+  на 404 «нема такої моделі» береться наступна назва, робоча запам'ятовується і потрапляє у звіт
+  наприкінці прогону. Помилки ЛІМІТУ (429/402/403) через цей підбір НЕ проходять — вони кидають
+  провайдера в cooldown і переводять на наступну сходинку (`tests/test_ai_ladder.py`).
 - Артикули матчаться ТІЛЬКИ нормалізовано (`common/normalize._nkey`) — BM Parts зберігає коди з дефісами.
+  Каталожні номери в тексті пишуться СУЦІЛЬНО: `11427953129`, не `11 42 7 953 129`.
 - AutoNova: прайс з Drive-теки (наповнює Apps Script у таблиці) + живий web-API під `AUTONOVA_COOKIE`
   (+ `AUTONOVA_PROXY` за потреби). IMAP-пошту і статичний кеш видалено 2026-07-24.
 
 ## Секрети (GitHub → Settings → Secrets)
 
-`GCP_SA_KEY`, `BMPARTS` (env `BMPARTS_TOKEN`), `AUTONOVA_FOLDER_ID`, `AUTONOVA_COOKIE`,
-`AUTONOVA_PROXY` (опц.), `ANTHROPIC_API_KEY` / `GH_MODELS_TOKEN` (опц., AI-шар додавання).
-Variables: `LIVE`, `LIVE_ONLY`, `BMPARTS_BRANDS`, `BMPARTS_TAB_LIMIT`.
+Обов'язкові: `GCP_SA_KEY`, `BMPARTS` (env `BMPARTS_TOKEN`), `AUTONOVA_FOLDER_ID`,
+`AUTONOVA_COOKIE`, `AUTONOVA_PROXY` (опц.).
+
+Сходи ШІ-провайдерів (`adding/ai_layer.py`) — **кожен ключ необов'язковий**: якщо секрета нема,
+провайдер просто пропускається, а без жодного ключа картка лишається повністю детермінованою:
+`GEMINI_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `MISTRAL_API_KEY`, `NVIDIA_API_KEY`,
+`SCALEWAY_API_KEY`, `CF_API_TOKEN` + `CF_ACCOUNT_ID` (Cloudflare — потрібні ОБИДВА,
+бо ID акаунта стоїть у самій адресі), `OPENROUTER_API_KEY`, `COHERE_API_KEY`,
+`GH_MODELS_TOKEN`, `ANTHROPIC_API_KEY`.
+
+Variables: `LIVE`, `LIVE_ONLY`, `BMPARTS_BRANDS`, `BMPARTS_TAB_LIMIT`, `AI_PROVIDERS` (порядок сходів).
 
 ## Документація
 
 - **PROJECT_HISTORY.md** — канонічна пам'ять проєкту (рішення власника, журнал змін).
 - **ПРАВИЛА_PROM.md** — правила наповнення карток (назви, ключовики, описи, мета, характеристики).
 - **MIGRATION_2026-07-24.md** — що і чому змінилося при переході на модульну структуру.
+- **AI_PROVIDERS_2026-07-26.md** — сходи безкоштовних ШІ-провайдерів (звірено з
+  `cheahjs/free-llm-api-resources`), ліміти й порядок перемикання.
