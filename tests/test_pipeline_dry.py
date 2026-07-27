@@ -8,6 +8,9 @@
     рівень 1 -> Export (бойова)      рівні 2 і 3 -> Staging_Prom
 
 і те, що позиція без фото в бойову таблицю не потрапляє ЖОДНИМ шляхом.
+Так само не потрапляє позиція, тип якої не мапиться в групу Prom: у каталозі
+без групи товар не знаходиться ні категорією, ні фільтром, а вигадувати номер
+групи заборонено (adding/groups.py).
 """
 import pytest
 
@@ -73,14 +76,15 @@ def _take_all(book):
 def test_review_builds_three_candidates_with_right_levels(sh):
     st, cands = _run_review(sh)
     assert st["source"] == "BM Parts" and st["target"] == "export"
-    assert len(cands) == 3
+    assert len(cands) == 4
 
     rows = sh.ws(REVIEW_TAB).get_all_values()
     head = rows[0]
     lv = head.index("Рівень")
     art = head.index("Артикул")
     by_art = {r[art]: r[lv] for r in rows[1:]}
-    assert by_art["11427953129"].startswith("1")     # повна картка
+    assert by_art["34116792217"].startswith("1")     # повна картка, група мапиться
+    assert by_art["11427953129"].startswith("2")     # усе є, але групи Prom нема
     assert by_art["34116794300"].startswith("3")     # нема фото
     assert by_art["63117214941"].startswith("2")     # фото є, характеристик мало
 
@@ -91,7 +95,7 @@ def test_review_shows_supplier_availability_verbatim(sh):
     head = rows[0]
     art, av = head.index("Артикул"), head.index("Наявність")
     by_art = {r[art]: r[av] for r in rows[1:]}
-    assert "наявн" in by_art["11427953129"].lower()
+    assert "наявн" in by_art["34116792217"].lower()
     assert "15" in by_art["34116794300"]             # під замовлення ~15 дн
 
 
@@ -108,13 +112,13 @@ def test_enrich_routes_by_level(sh):
     from adding.run import do_enrich
 
     _run_review(sh)
-    assert _take_all(sh) == 3
+    assert _take_all(sh) == 4
     do_enrich(sh, read_panel(sh))
 
     ex = sh.ws(EXPORT_TAB).get_all_values()
     stg = sh.ws(STAGING_TAB).get_all_values()
-    assert [r[0] for r in ex[1:]] == ["11427953129"]          # лише рівень 1
-    assert {r[0] for r in stg[1:]} == {"34116794300", "63117214941"}
+    assert [r[0] for r in ex[1:]] == ["34116792217"]          # лише рівень 1
+    assert {r[0] for r in stg[1:]} == {"11427953129", "34116794300", "63117214941"}
 
 
 def test_no_photo_never_reaches_export(sh):
@@ -155,7 +159,7 @@ def test_availability_follows_supplier_not_hardcoded(sh):
 
     i_av, i_qt = EX_HEAD.index("Наявність"), EX_HEAD.index("Кількість")
     row = sh.ws(EXPORT_TAB).get_all_values()[1]
-    assert row[i_av] == "!" and row[i_qt] == "5"      # у наявності 5 шт.
+    assert row[i_av] == "!" and row[i_qt] == "3"      # у наявності 3 шт.
 
     stg = {r[0]: r for r in sh.ws(STAGING_TAB).get_all_values()[1:]}
     order = stg["34116794300"]
@@ -173,7 +177,7 @@ def test_characteristics_survive_the_triples_layout(sh):
     from common.prom_format import read_chars
     row = sh.ws(EXPORT_TAB).get_all_values()[1]
     chars = read_chars(EX_HEAD, row)
-    assert ("Висота", "мм", "80") in chars
+    assert ("Діаметр", "мм", "330") in chars
     assert len(chars) >= 3
 
 
@@ -199,7 +203,7 @@ def test_review_skips_codes_already_in_export(sh):
     ex = sh.ws(EXPORT_TAB)
     ex.append_rows([["11427953129"] + [""] * (len(EX_HEAD) - 1)])
     _st, cands = _run_review(sh)
-    assert {c["article"] for c in cands} == {"34116794300", "63117214941"}
+    assert {c["article"] for c in cands} == {"34116792217", "34116794300", "63117214941"}
 
 
 def test_panel_status_is_written_back(sh):
@@ -210,7 +214,7 @@ def test_panel_status_is_written_back(sh):
     _take_all(sh)
     do_enrich(sh, read_panel(sh))
     status = sh.ws(PANEL_TAB).get_all_values()[8][1]
-    assert "Export 1" in status and "Staging 2" in status
+    assert "Export 1" in status and "Staging 3" in status
 
 
 def test_nothing_written_when_no_boxes_ticked(sh):
