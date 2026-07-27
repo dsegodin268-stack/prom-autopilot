@@ -12,6 +12,14 @@ from common.pricing import final_price
 from repricing.export_writer import avail_cell
 from adding.ai_layer import ai_enrich, merge_ai
 from adding.groups import map_group
+# Жорсткі межі Prom і Google лежать РІВНО В ОДНОМУ місці — adding/rules.py.
+# Доти кожне число було записане тричі: тут (шлюз), у валідаторі й руками в
+# промпті аудиту. Три копії одного числа розходяться завжди, і розходились:
+# шлюз різав мету по 70, валідатор мовчав про слова, промпт називав третє число.
+from adding.rules import (GTIN_LENGTHS, KW_MAX, NAME_MAX, PROM_UNITS as RULES_UNITS,
+                          bad_words_in, gtin_valid)
+from adding.rules import META_DESC_MAX as RULES_META_DESC_MAX
+from adding.rules import META_TITLE_MAX as RULES_META_TITLE_MAX
 
 SELLER = "Vision Dynamics, Київ"
 CITY = "Київ"
@@ -48,8 +56,11 @@ def esc(s):
     return html.escape(str(s or ""))
 
 
-PROM_UNITS = {"шт.", "шт", "т", "кг", "г", "куб.м", "л", "кв.м", "кв.см", "м", "км", "мм", "мл",
-              "пара", "упаковка", "комплект", "набір", "рулон", "послуга", "см"}
+# Список одиниць — з adding/rules.py. Тут лежала СКОРОЧЕНА копія того самого
+# списку, що у валідаторі: шлюз вважав одиницю невідомою і мовчки зрізав її
+# («година», «доба», «кВт», «лист»), а валідатор ту саму одиницю знав і теж
+# мовчав. Дві копії одного списку розходяться завжди.
+PROM_UNITS = RULES_UNITS
 _DROP_VAL = {"", "-", "–", "—", "n/a", "na", "нет", "немає", "none", "0", "0.0", "0,0"}
 # «артикул» і «гарант» прибрано зі списку викидання 27.07: ПРАВИЛА §5 перелічують
 # «Артикул» і «Гарантія» серед ОБОВ'ЯЗКОВИХ характеристик, а цей фільтр їх мовчки
@@ -164,7 +175,7 @@ def _name_for_prom(raw, art):
     n = _display_name(raw)
     if art and art.lower() not in n.lower():
         n = f"{n} {art}"
-    return clean_name(n)[:110]
+    return clean_name(n)[:NAME_MAX]
 
 
 # ---------- Опис (ПРАВИЛА §3a) ----------
@@ -240,8 +251,12 @@ TYPE_SYNONYMS = {
 }
 
 
-_KW_BAD = ("купити", "купить", "продати", "оптом", "замовити", "заказать",
-           "недорого", "дешево", "запчастини", "запчасти")
+# Заборонені слова — з rules.py. Тут лежала ТРЕТЯ копія списку (у валідаторі
+# була друга), і саме вона вирішувала, що поїде в Prom. Списки вже розійшлись:
+# тут не було «продать», а у валідаторі було.
+# Загальні слова («авто», «запчастини») перевіряються ІНАКШЕ, ніж рекламні:
+# ціле слово і лише коли з них складається вся фраза — див. rules.generic_only().
+# Раніше підрядок «запчастини» різав і законний запит «автозапчастини BMW F30».
 
 
 def _part_token(s):
@@ -273,8 +288,7 @@ def _kw_ok(k):
         return False
     if len(k.split()) == 1 and not re.search(r"\d", k):
         return False
-    low = k.lower()
-    return not any(b in low for b in _KW_BAD)
+    return not bad_words_in(k)
 
 
 def gen_keywords(product, lang):
@@ -331,12 +345,15 @@ def gen_keywords(product, lang):
     #   «{тип} {бренд} Київ» — §2 забороняє регіони в пошукових запитах, а §0-bis
     #      окремо каже не тягнути міста з чужих карток у нашу мету.
     # Замість них додано реальні фрази з артикулом і OEM — їх справді набирають.
-    return [k for k in kws if _kw_ok(k)][:40]
+    return [k for k in kws if _kw_ok(k)][:KW_MAX]
 
 
 # ---------- Мета ----------
-META_TITLE_MAX = 70   # ПРАВИЛА §4/§10: Google ріже сніпет приблизно тут
-META_DESC_MAX = 160   # ПРАВИЛА §4/§10
+# Числа — з rules.py (там же джерело кожного: довідка Prom про метатеги для
+# заголовка, власна межа проєкту для опису). Імена лишились ті самі, бо на них
+# спираються тести й старі імпорти.
+META_TITLE_MAX = RULES_META_TITLE_MAX
+META_DESC_MAX = RULES_META_DESC_MAX
 
 
 def _trim(s, limit):
@@ -414,14 +431,22 @@ def enforce_limits(f, art=""):
             if _kw_ok(x) and x.lower() not in seen:
                 seen.add(x.lower())
                 kws.append(x)
-        f[k] = ", ".join(kws[:40])
+        f[k] = ", ".join(kws[:KW_MAX])
     return f
 
 
 def gtin_from(product):
+    """Штрихкод для колонки «Код_маркування_(GTIN)».
+
+    27.07 додано контрольну цифру GS1. Раніше перевірялась лише ДОВЖИНА, тому
+    будь-які 13 цифр вважались штрихкодом. Google Merchant Center відхиляє
+    товар із неправильним GTIN, а Prom такий код мовчки приймає — тобто помилку
+    видно було б аж у відхиленому фіді Google, через тиждень і без пояснення.
+    Краще не віддати GTIN зовсім (поле не обов'язкове), ніж віддати вигаданий:
+    порожнє поле — це «нема даних», а хибне — це «ми брешемо про товар»."""
     for b in (product.get("barcodes") or []):
         d = re.sub(r"\D", "", str(b))
-        if len(d) in (8, 12, 13, 14):
+        if len(d) in GTIN_LENGTHS and gtin_valid(d):
             return d
     return ""
 

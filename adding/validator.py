@@ -3,23 +3,25 @@
 # CRITICAL — Prom відхилить при імпорті; WARN — пройде, але якість під питанням.
 # 2026-07-24: підключений у конвеєр додавання (adding/run.py) — CRITICAL не пишеться в Export.
 # 2026-07-26: validate_card() знає про рівень повноти — див. пояснення в самій функції.
+# 2026-07-27: жодного числа тут більше не написано руками. Усі межі й словники
+#   приходять з adding/rules.py — того самого файлу, з якого ГЕНЕРУЄТЬСЯ промпт
+#   аудиту ШІ. Доти межа «70» лежала в трьох місцях (шлюз, валідатор, промпт), і
+#   розійтись їм ніщо не заважало: код різав по одній, звіт лаявся на другу, ШІ
+#   перевіряв третю — мовчки.
 import re
+
+from adding.rules import (AVAIL_MAX_DAYS_IN_STOCK, CHARS_MIN, CITIES, DESC_MAX, DESC_MIN,
+                          DESC_TEXT_MIN, DESC_TEXT_SOFT_MAX, GTIN_LENGTHS, KW_BAD, KW_MAX,
+                          KW_MIN, META_DESC_MAX, META_TITLE_MAX, META_TITLE_WORDS_MAX,
+                          NAME_MAX, PROM_UNITS, REGIONS, SEO_WORDS, availability_ok,
+                          bad_words_in, city_in, gtin_valid, has_contact, has_emoji,
+                          price_ok, seo_words_in, unit_ok)
 
 CRITICAL = "CRITICAL"
 WARN = "WARN"
 
-# [Prom] закритий список одиниць виміру
-PROM_UNITS = {
-    "шт.", "т", "кг", "г", "куб.м", "л", "кв.м", "кв.см", "кв.фут", "кв.дм", "м", "км",
-    "дав", "мішок", "пара", "чол.", "упаковка", "сотка", "пог. м", "ящик", "мм", "мл",
-    "гр/кв.м", "кг/кв.м", "100 г", "комплект", "набір", "моток", "рулон", "послуга",
-    "см", "секція", "бухта", "об'єкт", "сторінка", "т/км", "добу", "ват", "лист",
-    "карат", "хвилина", "кВт", "мВт", "бобіна", "палетомісць", "зміна", "од.",
-    "година", "день", "тиждень", "місяць",
-}
-
 _LETTER = re.compile(r"[A-Za-zА-Яа-яІіЇїЄєҐґ]")
-_SEO_NAME = ("купити", "продати", "оптом", "купить", "заказать", "недорого", "дешево")
+_SEO_NAME = SEO_WORDS
 _LINK = re.compile(r"https?://|www\.|\.com|t\.me/|viber|telegram|whatsapp|instagram", re.I)
 _PHONE = re.compile(r"\+?380\d{9}|\b0\d{2}[\s\-]\d{3}[\s\-]?\d{2}[\s\-]?\d{2}\b")
 
@@ -39,12 +41,26 @@ def validate_name(name):
         out.append((CRITICAL, "name_dash", "Назва містить «-» (Prom відхилить)"))
     if re.search(r"  +", n):
         out.append((CRITICAL, "name_spaces", "Подвійні пробіли в назві"))
-    if len(n) > 110:
-        out.append((CRITICAL, "name_len", f"Назва {len(n)}>110 символів"))
+    if len(n) > NAME_MAX:
+        out.append((CRITICAL, "name_len", f"Назва {len(n)}>{NAME_MAX} символів"))
+    # Емодзі й контакти Prom називає забороненими прямо, і модерація такі назви
+    # знімає. Тому це CRITICAL, а не побажання: краще картка почекає в чернетці,
+    # ніж поїде в каталог і буде прихована вже там, де цього ніхто не побачить.
+    if has_emoji(n):
+        out.append((CRITICAL, "name_emoji", "Емодзі/нестандартні символи в назві (Prom забороняє)"))
+    if has_contact(n):
+        out.append((CRITICAL, "name_contact",
+                    "Контакти в назві (сайт/пошта/телефон/месенджер) — Prom забороняє"))
     low = n.lower()
     for w in _SEO_NAME:
         if w in low:
             out.append((WARN, "name_seo", f"SEO-слово в назві: {w}"))
+    # Місто — WARN, а не CRITICAL: пошук іде по основі слова, і теоретично
+    # «одес» може трапитись усередині чужого слова. Хибний CRITICAL зупинив би
+    # позицію, хибний WARN — лише рядок у звіті.
+    c = city_in(n)
+    if c:
+        out.append((WARN, "name_region", f"Назва регіону в назві: {c} (Prom забороняє)"))
     if n == n.upper() and _has_letter(n):
         out.append((WARN, "name_caps", "Назва повністю ВЕЛИКИМИ літерами"))
     return out
@@ -55,10 +71,10 @@ def validate_description(desc):
     d = (desc or "").strip()
     if not d:
         return [(CRITICAL, "desc_empty", "Опис порожній")]
-    if len(d) > 50000:
-        out.append((CRITICAL, "desc_len_max", f"Опис {len(d)}>50000 символів"))
-    if len(d) < 30:
-        out.append((WARN, "desc_short", "Опис <30 символів (Prom: замало)"))
+    if len(d) > DESC_MAX:
+        out.append((CRITICAL, "desc_len_max", f"Опис {len(d)}>{DESC_MAX} символів"))
+    if len(d) < DESC_MIN:
+        out.append((WARN, "desc_short", f"Опис <{DESC_MIN} символів (Prom: замало)"))
     if _LINK.search(d):
         out.append((WARN, "desc_link", "Опис містить посилання/месенджер (Prom забороняє)"))
     if _PHONE.search(d):
@@ -80,36 +96,69 @@ def validate_parts_description(desc):
 
 
 def validate_characteristics(chars):
+    """Мінімум — 3 (було 2). Це не наша вигадка: довідка Prom «Характеристики
+    товарів» каже дослівно «Вказуйте не менше 3 характеристик товару». Число
+    лежить у rules.CHARS_MIN, і туди ж дивиться промпт аудиту."""
     out = []
     chars = chars or []
-    if len(chars) < 2:
-        out.append((WARN, "char_min", f"Характеристик {len(chars)}<2 (Prom рекомендує 2-3)"))
+    if len(chars) < CHARS_MIN:
+        out.append((WARN, "char_min",
+                    f"Характеристик {len(chars)}<{CHARS_MIN} (Prom: не менше {CHARS_MIN})"))
     for tpl in chars:
         unit = (tpl[1] if len(tpl) > 1 else "") or ""
         unit = unit.strip()
-        if unit and unit not in PROM_UNITS:
+        if not unit_ok(unit):
             out.append((WARN, "char_unit", f"Невідома одиниця виміру: «{unit}»"))
     return out
+
+
+def validate_gtin(gtin):
+    """GTIN перевіряється контрольною цифрою, а не довжиною.
+
+    До 27.07 перевірялась ЛИШЕ довжина: 13 випадкових цифр проходили як
+    справжній EAN. Google такий товар відхиляє в Merchant Center — позиція
+    зникає з Google Покупок, і причина ніде не написана. Порожній GTIN — не
+    помилка: у більшості автозапчастин штрихкода немає взагалі, і Google прямо
+    дозволяє його не вказувати."""
+    g = str(gtin or "").strip()
+    if not g:
+        return []
+    if not re.fullmatch(r"\d+", g):
+        return [(WARN, "gtin_format", "GTIN містить не лише цифри (пробіли/дефіси заборонені)")]
+    if len(g) not in GTIN_LENGTHS:
+        return [(WARN, "gtin_len",
+                 f"GTIN {len(g)} цифр — дозволено {'/'.join(str(x) for x in GTIN_LENGTHS)}")]
+    if not gtin_valid(g):
+        return [(WARN, "gtin_check", "GTIN не проходить контрольну цифру GS1 (Google відхилить)")]
+    return []
+
+
+def validate_availability(avail, days):
+    """«В наявності» — лише якщо відправка ≤3 днів (правило Prom, не наше).
+
+    Це та сама вимога, через яку в конвеєрі стоїть avail_cell(): позиція під
+    замовлення мусить показувати реальний строк. Тут — контроль на воротах, щоб
+    жоден новий шлях у код не проніс «в наявності» повз нього."""
+    if availability_ok(avail, days):
+        return []
+    return [(WARN, "avail_days",
+             f"«В наявності» при строку {days} дн. — Prom дозволяє лише до "
+             f"{AVAIL_MAX_DAYS_IN_STOCK} днів")]
 
 
 # ---------- Мета, ключовики, довжина опису (чекліст ПРАВИЛА §10) ----------
 # 27.07: цих чотирьох перевірок не було ВЗАГАЛІ. Тому картка з 9 ключовиками,
 # мета-заголовком на 96 символів і без артикула в меті проходила валідатор
 # мовчки й лягала в Export. Тепер рахує код, а не око.
-META_TITLE_MAX = 70
-META_DESC_MAX = 160
-KW_MIN, KW_MAX = 15, 40
-DESC_TEXT_MIN, DESC_TEXT_SOFT_MAX = 400, 800
-
+# META_TITLE_MAX, META_DESC_MAX, KW_MIN/KW_MAX, DESC_TEXT_* прийшли з rules.py —
+# тут вони більше не оголошуються. Назви лишились ті самі, щоб старі імпорти
+# (і тести) працювали без правок.
 _TAG = re.compile(r"<[^>]+>")
-_KW_BAD = ("купити", "купить", "продати", "оптом", "замовити", "заказать",
-           "недорого", "дешево", "запчастини", "запчасти")
+_KW_BAD = KW_BAD
 # Основи, а не словникові форми: «у Києві» — це «києв», а не «київ». Перший
 # варіант списку ловив лише називний відмінок, тому «Купити недорого в Києві»
 # проходило як чисте.
-_CITIES = ("київ", "києв", "киев", "харків", "харков", "харьков",
-           "одес", "львів", "львов", "дніпр", "днепр")
-_COUNTRY = ("україн", "украин")
+_CITIES = CITIES
 # МІСТО і КРАЇНА — різні речі, і плутати їх не можна.
 #   У ключових запитах шкодять обидві: за «фільтр Україна» деталь ніхто не шукає,
 #   а місце у списку (15-40 фраз) така фраза з'їдає.
@@ -118,11 +167,15 @@ _COUNTRY = ("україн", "украин")
 #   Забороняє ж §0-bis саме нав'язування МІСТА («купити в Києві») — його й ловимо.
 # Поки список був один, прапорець meta_desc_region висів на КОЖНІЙ картці, і сенс
 # валідатора зникав: коли попередження стоїть завжди, його перестають читати.
-_REGIONS = _CITIES + _COUNTRY
+_REGIONS = REGIONS
 
 
 def validate_meta(title, desc, article=""):
-    """HTML-заголовок і HTML-опис: довжина, артикул, заборонені слова, місто."""
+    """HTML-заголовок і HTML-опис: довжина, артикул, заборонені слова, місто.
+
+    27.07 додано межу в СЛОВАХ. Довідка Prom про метатеги називає дві межі
+    поруч: «не довше 12-ти слів або 70-ти символів». Дванадцять коротких слів
+    легко вкладаються в 70 символів, тому перевірка довжини їх не ловила."""
     out = []
     art = str(article or "").strip().lower()
     for kind, val, limit, code in (("заголовок", title, META_TITLE_MAX, "meta_title"),
@@ -133,13 +186,19 @@ def validate_meta(title, desc, article=""):
             continue
         if len(v) > limit:
             out.append((WARN, f"{code}_len", f"Мета-{kind} {len(v)}>{limit} символів"))
+        if code == "meta_title" and len(v.split()) > META_TITLE_WORDS_MAX:
+            out.append((WARN, "meta_title_words",
+                        f"Мета-заголовок {len(v.split())} слів > {META_TITLE_WORDS_MAX} (Prom)"))
         low = v.lower()
         if art and art not in low:
             out.append((WARN, f"{code}_no_art", f"Мета-{kind} без каталожного номера"))
-        for w in _KW_BAD:
-            if w in low:
-                out.append((WARN, f"{code}_seo", f"Заборонене слово в мета-{kind}і: {w}"))
-                break
+        # У меті перевіряються ЛИШЕ рекламні слова. Загальні («автозапчастини»,
+        # «запчастини для BMW») — це звичайна мова мета-опису, який читає людина
+        # у видачі Google, а не окремий пошуковий запит, що з'їдає місце у списку.
+        seo = seo_words_in(low)
+        if seo:
+            out.append((WARN, f"{code}_seo",
+                        f"Заборонене слово в мета-{kind}і: {seo[0]}"))
         for r in _CITIES:
             if r in low:
                 out.append((WARN, f"{code}_region", f"Місто у мета-{kind}і: {r}"))
@@ -160,7 +219,9 @@ def validate_keywords(kws, article=""):
     if len(kws) > KW_MAX:
         out.append((WARN, "kw_many", f"Запитів {len(kws)}>{KW_MAX} (ПРАВИЛА §10)"))
     low = [str(k).lower() for k in kws]
-    bad = sorted({w for w in _KW_BAD for k in low if w in k})
+    # Кожна фраза перевіряється ОКРЕМО: рекламне слово шкодить будь-де, а
+    # загальне — лише коли з нього складається вся фраза (див. rules.bad_words_in).
+    bad = sorted({w for k in low for w in bad_words_in(k)})
     if bad:
         out.append((WARN, "kw_seo", "Заборонені слова в запитах: " + ", ".join(bad)))
     reg = sorted({r for r in _REGIONS for k in low if r in k})
@@ -244,8 +305,20 @@ def validate_card(card, is_part=True, level=1):
         flags.append(("req", CRITICAL, "id_empty", "Нема Ідентифікатор_товару"))
     if card.get("price") in (None, "", 0, "0"):
         flags.append(("req", WARN, "price_empty", "Ціна порожня/0"))
+    elif not price_ok(card.get("price")):
+        # Prom окремим рядком забороняє «технічні» ціни на кшталт 1 грн: такий
+        # товар алгоритм маркетплейсу ховає як занижений за ціною.
+        flags.append(("req", WARN, "price_tech",
+                      f"«Технічна» ціна {card.get('price')} — Prom забороняє"))
     if not card.get("group_id"):
         flags.append(("req", WARN, "group_empty", "Нема групи"))
+    # Наступні дві перевірки — лише якщо поля передали. Старі виклики
+    # validate_card() від цього нічого не отримують і нічого не втрачають.
+    for f in validate_gtin(card.get("gtin")):
+        flags.append(("gtin",) + f)
+    if "avail" in card:
+        for f in validate_availability(card.get("avail"), card.get("days")):
+            flags.append(("avail",) + f)
     return flags
 
 
