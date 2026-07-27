@@ -35,3 +35,33 @@ def test_recheck_skips_when_autonova_has_nothing(monkeypatch):
     instock = {}
     aw.recheck_autonova_faster(["X1"], best, instock, "cookie")
     assert best["X1"]["brand"] == "BMW"
+
+
+def test_recheck_returns_upgraded_and_fires_callback(monkeypatch):
+    # Апгрейджені коди повертаються списком і on_upgrade викликається одразу
+    # (для інкрементального запису в Export).
+    monkeypatch.setattr(aw, "autonova_web_authorized", lambda c: True)
+    monkeypatch.setattr(aw, "_resolve_autonova", lambda code, cookie, brands: {
+        "name": "", "cost": 130, "qty": 2, "days": 1, "presence": "available", "brand": "Авто-web"})
+    best = {"X1": {"cost": 100, "qty": 0, "days": 15, "presence": "order", "brand": "BMW"}}
+    instock = {}
+    written = []
+    up = aw.recheck_autonova_faster(["X1"], best, instock, "cookie", on_upgrade=written.append)
+    assert up == ["X1"]
+    assert written == ["X1"]          # колбек спрацював саме для прискореного коду
+
+
+def test_recheck_survives_resolver_exception(monkeypatch):
+    # Одна погана позиція (виняток у резолвері) не має валити всю крос-перевірку.
+    def boom(code, cookie, brands):
+        if code == "BAD":
+            raise ValueError("api hiccup")
+        return {"name": "", "cost": 130, "qty": 1, "days": 1, "presence": "available", "brand": "Авто-web"}
+    monkeypatch.setattr(aw, "autonova_web_authorized", lambda c: True)
+    monkeypatch.setattr(aw, "_resolve_autonova", boom)
+    best = {"BAD": {"cost": 1, "qty": 0, "days": 15, "presence": "order", "brand": "BMW"},
+            "OK": {"cost": 1, "qty": 0, "days": 15, "presence": "order", "brand": "BMW"}}
+    instock = {}
+    up = aw.recheck_autonova_faster(["BAD", "OK"], best, instock, "cookie")
+    assert up == ["OK"]               # BAD пропущено, OK прискорено
+    assert best["OK"]["brand"] == "Авто-web"
