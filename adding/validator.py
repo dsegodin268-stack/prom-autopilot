@@ -326,6 +326,46 @@ def validate_canon(card, is_part=True):
     return flags
 
 
+# Поля, у яких мова мусить бути витримана, і яка саме: ключ у словнику картки,
+# очікувана мова, як назвати поле в зауваженні.
+#
+# Префікс «назва: » у тексті поставлено не для краси: ai_layer.repairable()
+# пропускає в другий прохід ШІ лише ті зауваження, що починаються з імені поля
+# з _REPAIR_FIELDS. Без префікса модель отримала б зауваження й не мала б права
+# його виправити.
+_LANG_FIELDS = (
+    ("name", "ua", "назва"),
+    ("name_ru", "ru", "назва"),
+    ("description", "ua", "опис"),
+    ("meta_title", "ua", "заголовок"),
+    ("meta_desc", "ua", "мета"),
+    ("keywords", "ua", "запити"),
+    ("keywords_ru", "ru", "запити"),
+)
+
+
+def validate_lang(card):
+    """Мова полів не змішується (ПРАВИЛА, правило `lang`).
+
+    27.07. Прогін №18 випустив у бойову таблицю назву «Пыльник амортизатора
+    (переднього)»: словник перекладу знав слово «пильник» і не знав слова
+    «переднього», тому половина назви лишилась українською. Prom такі назви
+    приймає мовчки — отже єдиним, хто міг це спіймати, був код, і він не ловив.
+
+    Рівень WARN, а не CRITICAL: змішана мова не ламає імпорт, її треба
+    ПЕРЕПИСАТИ, а не викинути позицію. CRITICAL тут означав би `continue` в
+    run.py, тобто картка зникла б замість того, щоб піти в другий прохід ШІ."""
+    flags = []
+    for key, want, label in _LANG_FIELDS:
+        if key not in card:
+            continue
+        problem = rules.lang_mixed(card.get(key), want=want)
+        if problem:
+            flags.append((key.split("_")[0], WARN, "lang_mix",
+                          f"{label}: {problem}"))
+    return flags
+
+
 def validate_card(card, is_part=True, level=1):
     """card: dict(name, description, chars, images, price, group_id, product_id).
     Повертає список (field, level, code, message).
@@ -384,6 +424,10 @@ def validate_card(card, is_part=True, level=1):
     if "avail" in card:
         for f in validate_availability(card.get("avail"), card.get("days")):
             flags.append(("avail",) + f)
+    # МОВА — перед каноном: це перевірка тих самих текстових полів, що вище,
+    # просто наскрізна. Виконується для будь-якої картки, бо змішана мова —
+    # це брак і в запчастині, і в аксесуарі.
+    flags.extend(validate_lang(card))
     # КАНОН — останнім, щоб у summarize() ці коди стояли поруч і в звіті було
     # видно одним оком, картка розійшлася з довідником чи ні.
     flags.extend(validate_canon(card, is_part=is_part))

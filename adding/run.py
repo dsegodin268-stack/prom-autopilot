@@ -21,9 +21,9 @@ from common.config import EXPORT_TAB, ID_HUB, LIVE, REVIEW_TAB, SRC_BMPARTS, STA
 from common.normalize import num
 from common.prom_format import write_chars
 from common.sheets import find_ws, keyf, open_hub
-from adding.ai_layer import audit_card, audit_line
+from adding.ai_layer import audit_card, audit_line, providers_ready
 from adding.card_builder import build_fields, product_from_candidate, repair_card
-from adding.completeness import level, route
+from adding.completeness import level_card, route_card
 from adding.panel import ensure_panel, read_panel, write_status
 from adding.review import do_review, parse_avail
 from adding.sources import candidate, key
@@ -59,6 +59,12 @@ def _valid_card(f, chars, imgs, price, art):
             "meta_title": f.get("HTML_заголовок_укр"),
             "meta_desc": f.get("HTML_опис_укр"),
             "keywords": f.get("Пошукові_запити_укр"),
+            # Російські двійники (27.07). Без них перевірка мови бачила лише
+            # половину картки: у бойову таблицю пішла назва «Пыльник
+            # амортизатора (переднього)» — саме російське поле, до якого код
+            # тоді не мав доступу.
+            "name_ru": f.get("Назва_позиції"),
+            "keywords_ru": f.get("Пошукові_запити"),
             # Друга вісь — розділ каталогу Prom. Передаємо ОБИДВА поля:
             # валідатор звіряє посилання з ідентифікатором, бо в бойовій
             # таблиці вони мусять описувати той самий розділ.
@@ -145,6 +151,24 @@ def do_enrich(sh, st):
         c["source"] == SRC_BMPARTS for _rn, c in selected)) else {}
 
     use_ai = st.get("ai") != "Без ШІ"
+    # МОВЧАННЯ ШІ МУСИТЬ БУТИ ВИДНО (27.07). У прогоні №18 у журналі не було
+    # жодного рядка «[ai]», а в «Статусі» — жодного зауваження, і це читалося
+    # як «ШІ перевірив, усе добре». Насправді ШІ не перевіряв нічого: ключа не
+    # було в жодного з 12 провайдерів. Тепер стан ladder друкується один раз на
+    # прогін, а якщо ключів нема — про це пишеться в кожному рядку статусу.
+    # Це не блокує конвеєр: картки складаються кодом і без ШІ.
+    ready = providers_ready() if use_ai else []
+    if not use_ai:
+        no_ai = "ШІ вимкнено в пульті"
+        print("[add] ШІ: вимкнено в пульті («Без ШІ»)")
+    elif not ready:
+        no_ai = "ШІ не перевіряв: нема ключа жодного провайдера"
+        print("[add] ⚠ ШІ: нема ключа ЖОДНОГО провайдера — картки складаються "
+              "без ШІ, зауважень від моделі не буде. Додай хоча б один ключ у "
+              "Settings → Secrets.")
+    else:
+        no_ai = ""
+        print(f"[add] ШІ: доступні провайдери — {', '.join(ready)}")
     to_export, to_staging, mark = [], [], {}
     seen = set()
     for rn, c in selected:
@@ -173,7 +197,15 @@ def do_enrich(sh, st):
             # Рівень рахуємо ДО валідації: картці рівня 3 брак фото ставиться в
             # провину лише як WARN, бо вона й так їде в чернетку «чекає фото».
             # Інакше валідатор відхиляв би її тут і позиція гинула б мовчки.
-            lv = level(c)
+            #
+            # 27.07: рахуємо по ГОТОВІЙ картці (level_card), а не по кандидату.
+            # Раніше стояло level(c) — тобто рівень визначала СИРОВИНА з прайсу,
+            # ще до того, як card_builder зібрав характеристики, підтягнув фото
+            # й змапив групу. Через це позиція з 10 характеристиками і 3 фото
+            # отримувала «рівень 2: нема характеристик, сумісності» й лягала в
+            # чернетку. Тепер судимо те, що реально поїде в таблицю.
+            lv = level_card(chars, imgs, f.get("Номер_групи"),
+                            f.get("Ідентифікатор_підрозділу"))
             card = _valid_card(f, chars, imgs, price, art)
             flags = validate_card(card, is_part=True, level=lv)
             verdict = summarize(flags)
@@ -193,7 +225,8 @@ def do_enrich(sh, st):
             # на те, чого код не бачить, а не на переказ довідника. Плюс ці
             # рядки лишаються у відповіді, навіть якщо ШІ мовчить, — розбіжність
             # із канонічною таблицею мусить бути видно завжди.
-            canon_notes = [m for (_fl, _lv, c, m) in flags if c.startswith("canon_")]
+            canon_notes = [m for (_fl, _lv, c, m) in flags
+                           if c.startswith(("canon_", "lang_"))]
             audit = audit_card(f, chars=chars, images=imgs, article=art,
                                group=f.get("Номер_групи"), known=canon_notes,
                                use_ai=use_ai)
@@ -226,35 +259,28 @@ def do_enrich(sh, st):
                     mark[rn] = f"відхилено після правки ШІ: {verdict[:80]}"
                     print(f"[add] ⛔ {art}: після правки {verdict}")
                     continue
-                canon_notes = [m for (_fl, _lv, c, m) in flags if c.startswith("canon_")]
+                canon_notes = [m for (_fl, _lv, c, m) in flags
+                           if c.startswith(("canon_", "lang_"))]
                 audit = audit_card(f, chars=chars, images=imgs, article=art,
                                    group=f.get("Номер_групи"), known=canon_notes,
                                    use_ai=use_ai)
             ai_note = audit_line(audit)
             if fixed:
                 ai_note = (ai_note + " | " if ai_note else "") + f"✍ {', '.join(fixed)}"
+            if no_ai:
+                ai_note = (ai_note + " | " if ai_note else "") + no_ai
 
-            dest, status = route(c, st["target"])
-            # Запобіжник: навіть якщо рівень порахувався оптимістично, картка
-            # без жодного фото в бойову таблицю не піде — Prom її відхилить.
-            if dest == "export" and not imgs:
-                dest, status = "staging", "чекає фото"
-            # Те саме для групи (27.07). map_group() свідомо повертає '' для
-            # невпізнаного типу — вигадувати номер групи Prom не можна, бо
-            # неіснуючий ID ламає імпорт усього файлу. Але раніше така картка
-            # усе одно їхала в Export із порожньою групою: наприклад масляний
-            # фільтр, якого просто нема в сіді GROUPS. Тепер вона чекає, поки
-            # власник обере групу руками.
-            if dest == "export" and not f.get("Номер_групи"):
-                dest, status = "staging", "нема групи — обрати вручну"
-            # І те саме для ДРУГОЇ осі (27.07). Група — це вітрина магазину,
-            # а «підрозділ» — розділ каталогу самого Prom: у бойовій таблиці він
-            # заповнений на 3960/3960 позицій, і без нього картка є на сайті
-            # магазину, але її нема в маркетплейсному пошуку — тобто там, де її
-            # шукає покупець. Ідентифікатор теж не вигадується.
-            if dest == "export" and not f.get("Ідентифікатор_підрозділу"):
-                dest, status = "staging", "нема підрозділу — обрати вручну"
-            # І ЧЕТВЕРТИЙ запобіжник — за каноном (27.07). Таблиця експорту
+            # Маршрут — теж по ГОТОВІЙ картці (27.07). route_card перевіряє
+            # рівно те, що поїде в таблицю: фото, ≥3 непорожні характеристики,
+            # номер групи Prom і ідентифікатор підрозділу. Три окремі
+            # запобіжники, що стояли тут раніше («не піде без фото», «нема
+            # групи», «нема підрозділу»), увійшли всередину route_card — тому
+            # видалені: дублювати ту саму умову в двох місцях означає рано чи
+            # пізно змінити її лише в одному.
+            dest, status = route_card(chars, imgs, f.get("Номер_групи"),
+                                      f.get("Ідентифікатор_підрозділу"),
+                                      st["target"])
+            # І ЩЕ ОДИН запобіжник — за каноном (27.07). Таблиця експорту
             # оголошена канонічним шаблоном, а в ній у кожної запчастини є
             # обов'язковий набір характеристик і «Код запчастини»: саме за цим
             # полем Prom підчіплює крос-довідник, тобто показує позицію тому,
