@@ -111,11 +111,18 @@ def parse_details(details):
     return out
 
 
+# Межа назви живе в adding/rules.py (NAME_MAX). Тут вона продубльована свідомо:
+# common/ спільний із нічним репрайсером, і тягнути в нього модуль із adding/
+# означало б, що репрайсер залежить від конвеєра додавання. Щоб копія не
+# розійшлася мовчки, її рівність стереже тест test_rules_book.py.
+NAME_MAX = 110
+
+
 def clean_name(name):
-    """Назва для Prom: без «-», без подвійних пробілів, ≤110."""
+    """Назва для Prom: без «-», без подвійних пробілів, ≤NAME_MAX."""
     n = (name or "").replace("—", " ").replace("–", " ").replace("-", " ")
     n = re.sub(r"\s+", " ", n).strip()
-    return n[:110].strip()
+    return n[:NAME_MAX].strip()
 
 
 def cdn_url(path):
@@ -129,15 +136,28 @@ def cdn_url(path):
 
 
 def oem_and_replacements(product):
-    """(список OEM-номерів, список замінників) з oe[] + analogs{}."""
+    """(список OEM-номерів, список замінників) з oe[] + analogs{}.
+
+    27.07. Було f"{o.get('number')} ({o.get('brand')})" беззастережно: у позицій,
+    де бренд замінника не заповнений (а в BM Parts таких багато), в опис ПОКУПЦЯ
+    їхало «11427854445 (None)». Англійське None у картці українського магазину —
+    це видно з першого погляду і виглядає як зламаний сайт. Другий випадок:
+    номер, у якому бренд уже стоїть у дужках, перетворювався на
+    «11427854445 (BMW) (None)». Тепер дужки додаються, лише коли є що в них
+    класти, і лише якщо їх там ще немає."""
     oe = product.get("oe") or []
     oem = [o.get("number") for o in oe if o.get("is_oem") and o.get("number")]
-    other_oe = [f"{o.get('number')} ({o.get('brand')})" for o in oe
-                if not o.get("is_oem") and o.get("number")]
+    other_oe = []
+    for o in oe:
+        num = str(o.get("number") or "").strip()
+        if o.get("is_oem") or not num:
+            continue
+        br = str(o.get("brand") or "").strip()
+        other_oe.append(f"{num} ({br})" if br and f"({br})" not in num else num)
     analogs = product.get("analogs") or {}
     repl = []
     for a in analogs.values():
-        art, br = a.get("article"), a.get("brand")
+        art, br = str(a.get("article") or "").strip(), str(a.get("brand") or "").strip()
         if art:
             repl.append(f"{br} {art}".strip())
     return oem, (other_oe + repl)
