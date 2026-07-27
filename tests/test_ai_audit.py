@@ -208,6 +208,72 @@ def test_status_line_marks_who_is_speaking():
     assert audit_line({"verdict": "ok", "score": 98, "issues": []}) == "ШІ: ок"
 
 
+# ------------------------------------------------------ перевірка за каноном ---
+# Вимога власника 27.07: «заклади це як канонічний шаблон, якого треба
+# притримуватися… цей крок перевірки також додай, щоб була перевірка ШІ за цими
+# вимогами». Нижче — рівно про стик коду й моделі: що модель БАЧИТЬ і що вона
+# не має права зіпсувати.
+
+def test_the_marketplace_section_reaches_the_audit(monkeypatch):
+    """Правило `section` у промпті стояло (who='обидва'), а самих полів у payload
+    не було: модель просили подивитись на те, чого їй не показали."""
+    seen = _spy(monkeypatch, '{"verdict":"ok","issues":[]}')
+    f = _card()
+    f.update({"Ідентифікатор_підрозділу": "341523",
+              "Посилання_підрозділу": "https://prom.ua/Pylniki-avtomobilnye"})
+    audit_card(f, article="34116792217")
+    payload = seen[0][1]
+    assert "341523" in payload and "Pylniki-avtomobilnye" in payload
+
+
+def test_code_findings_are_handed_to_the_model(monkeypatch):
+    """Модель має право лише на 6 зауважень. Якщо вона витратить їх на переказ
+    того, що й так порахував код, місця на власне спостереження не лишиться."""
+    seen = _spy(monkeypatch, '{"verdict":"ok","issues":[]}')
+    audit_card(_card(), article="34116792217",
+               known=["порожня характеристика «Код запчастини»"])
+    payload = seen[0][1]
+    assert "Вже_знайшов_код" in payload and "Код запчастини" in payload
+    # межа лишилась там, де була
+    for forbidden in ("2400", "1580", "Собівартість"):
+        assert forbidden not in payload, forbidden
+
+
+def test_code_findings_survive_a_silent_provider(monkeypatch):
+    """Розбіжність із канонічною таблицею — це ФАКТ, порахований кодом. Зникати
+    разом із провайдером, квотою чи вимикачем він не має права."""
+    monkeypatch.setattr(ai_layer, "_ai_call", lambda s, u: None)
+    res = audit_card(_card(), article="34116792217", known=["групи 999 немає в довіднику"])
+    assert res and res["ai"] is False and res["verdict"] == "fix"
+    assert audit_line(res).startswith("Канон: ")
+    assert "999" in audit_line(res)
+
+
+def test_canon_is_shown_even_with_the_ai_switch_off(monkeypatch):
+    """AI_AUDIT=0 вимикає ДУМКУ моделі, а не перевірку за довідником."""
+    seen = _spy(monkeypatch, '{"verdict":"ok","issues":[]}')
+    monkeypatch.setenv("AI_AUDIT", "0")
+    res = audit_card(_card(), article="34116792217", known=["нема підрозділу"])
+    assert seen == [], "квота не витрачається"
+    assert audit_line(res) == "Канон: нема підрозділу"
+    # «Без ШІ» в пульті — те саме
+    assert audit_line(audit_card(_card(), article="34116792217",
+                                 known=["нема підрозділу"], use_ai=False)) == \
+        "Канон: нема підрозділу"
+
+
+def test_code_findings_come_first_and_are_not_duplicated(monkeypatch):
+    """Знахідка коду точна, зауваження моделі дорадче — тому код попереду.
+    А якщо модель переказала те саме, дубль у клітинку не їде."""
+    _spy(monkeypatch, '{"verdict":"ok","score":90,"issues":['
+                      '{"field":"","why":"групи 999 немає в довіднику"},'
+                      '{"field":"запити","why":"замало фраз"}]}')
+    res = audit_card(_card(), article="34116792217", known=["групи 999 немає в довіднику"])
+    assert res["issues"] == ["групи 999 немає в довіднику", "запити: замало фраз"]
+    assert res["verdict"] == "fix" and res["ai"] is True
+    assert audit_line(res).startswith("ШІ: ")
+
+
 def test_prompt_carries_the_hard_limits(monkeypatch):
     """Промпт аудиту — це і є «жорсткі правила Prom та Google» словами. Якщо
     хтось витре з нього межі, ШІ мовчки перестане їх перевіряти, і помітити це

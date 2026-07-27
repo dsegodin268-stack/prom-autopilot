@@ -52,9 +52,12 @@ def test_every_limit_names_its_source():
         url, title = rules.source(src)
         assert title, name
         # 'own' — свідомо власна межа проєкту, у першоджерелах числа немає;
-        # решта мусить мати посилання, яке можна відкрити й перевірити.
+        # решта мусить показувати, ДЕ це перевірити: або посилання на довідку,
+        # або файл у репозиторії (канон зчитано з бойової таблиці, і лежить він
+        # у adding/canon.py — це так само перевірна адреса, як і URL).
         if src != "own":
-            assert url.startswith("http"), f"{name}: джерело {src} без посилання"
+            ok = url.startswith("http") or url.endswith((".py", ".md"))
+            assert ok, f"{name}: джерело {src} без посилання"
 
 
 def test_source_of_unknown_key_does_not_crash():

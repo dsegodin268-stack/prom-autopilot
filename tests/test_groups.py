@@ -2,7 +2,8 @@
 # Група Prom — одне з полів, яких ШІ не має права торкатися (ПРАВИЛА §8), тому
 # вона мусить рахуватись детерміновано і НЕ вигадуватись. Порожня група — це
 # нормальний сигнал «докурувати вручну», а не привід підставити випадковий ID.
-from adding.groups import map_group
+from adding import canon
+from adding.groups import GROUPS, map_group, map_place
 
 
 def test_maps_by_name():
@@ -81,3 +82,65 @@ def test_sentinel_type_really_does_not_map():
 def test_missing_fields_do_not_crash():
     assert map_group({}) == ("", "")
     assert map_group({"nodes": None, "name": None}) == ("", "")
+
+
+# ------------------------------------------------- друга вісь: підрозділ ---
+# У бойовому експорті підрозділ маркетплейсу заповнений на 3960/3960 рядків.
+# Це ОКРЕМЕ від групи магазину дерево — каталог самого Prom.ua, — і саме воно
+# вирішує, у якому розділі маркетплейсу покупець побачить позицію. Доти
+# map_group() віддавав лише групу, тобто половину адреси.
+def test_map_place_returns_both_axes():
+    gid, gname, sid, url = map_place({"name": "Фільтр масляний BMW 3 F30"})
+    assert (gid, gname) == ("138500033", "Масляные фильтры")
+    assert (sid, url) == ("12021001", "https://prom.ua/Filtry-maslyannye")
+
+
+def test_every_rule_points_at_real_ids():
+    """Головне правило канону: ID не вигадуються. Неіснуючий номер ламає імпорт
+    УСЬОГО файлу, тому кожен рядок таблиці звіряється з довідниками."""
+    for kws, gid, gname, sid in GROUPS:
+        assert canon.group_exists(gid), f"{kws}: групи {gid} немає в довіднику"
+        assert canon.group_name(gid) == gname, f"{kws}: назва групи {gid} розійшлася"
+        assert canon.section_exists(sid), f"{kws}: підрозділу {sid} немає в довіднику"
+
+
+def test_section_url_is_derived_never_typed():
+    """Адреса підрозділу рахується з ID, тому розійтися вони не можуть фізично."""
+    for _kws, _gid, _gn, sid in GROUPS:
+        assert canon.section_url(sid).startswith("https://prom.ua/")
+
+
+def test_unknown_type_leaves_both_axes_empty():
+    assert map_place({"name": "Незрозуміла деталь XYZ"}) == ("", "", "", "")
+
+
+def test_bump_stop_no_longer_lands_in_the_parent_group():
+    """Косяк, який видно було в чернетці: відбійник амортизатора мапився на
+    «Амортизаторы» (батьківська група), бо в назві є слово «амортизатор».
+    Покупець, що фільтрує каталог по «Пыльники и отбойники», його не бачив."""
+    gid, gname, sid, _u = map_place({"name": "Отбойник амортизатора (заднего) BMW 5 (E39)"})
+    assert (gid, gname, sid) == ("142124961", "Пыльники и отбойники", "341523")
+    assert map_place({"name": "Комплект пильників переднього амортизатора"})[0] == "142124961"
+
+
+def test_narrow_suspension_rules_win_over_the_wide_one():
+    assert map_place({"name": "Пружина передня BMW F10"})[0] == "138537783"
+    assert map_place({"name": "Опора амортизатора передня BMW"})[0] == "142125458"
+    # сам амортизатор лишається у своїй групі — вужчої підгрупи для нього нема
+    assert map_place({"name": "Амортизатор передній BMW F30"})[0] == "138537782"
+
+
+def test_brake_pads_have_their_own_place():
+    """Колодки доти не мапилися взагалі й зависали в чернетці, хоч це один із
+    найходовіших розхідників ТО."""
+    assert map_place({"name": "Тормозные колодки передние BMW"})[0] == "138537680"
+    assert map_place({"name": "Гальмівні колодки задні BMW"})[2] == "120229"
+
+
+def test_same_group_can_have_different_sections():
+    """Доказ, що вісі різні: одна група магазину «Система подачи воздуха» дає
+    різні розділи маркетплейсу залежно від типу деталі."""
+    duct = map_place({"name": "Воздуховод фильтра воздушного BMW X3"})
+    manifold = map_place({"name": "Впускной коллектор BMW N54"})
+    assert duct[0] == manifold[0] == "154216457"
+    assert duct[2] != manifold[2]

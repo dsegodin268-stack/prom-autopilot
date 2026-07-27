@@ -14,6 +14,7 @@
 """
 import pytest
 
+from adding import canon
 from common.config import EXPORT_TAB, PANEL_TAB, REVIEW_TAB, STAGING_TAB
 from tests.fakes import FakeBM, FakeSpreadsheet
 
@@ -177,8 +178,166 @@ def test_characteristics_survive_the_triples_layout(sh):
     from common.prom_format import read_chars
     row = sh.ws(EXPORT_TAB).get_all_values()[1]
     chars = read_chars(EX_HEAD, row)
-    assert ("Діаметр", "мм", "330") in chars
-    assert len(chars) >= 3
+    # У фейковій шапці блоків лише ТРИ, тож вижити мусять найважливіші. Раніше
+    # тут чекався «Діаметр» постачальника — і це було симптомом справжньої
+    # діри: у картку взагалі не потрапляв обов'язковий набір Prom. Тепер
+    # порядок канонічний (adding/canon.py), і при обрізанні гине другорядне.
+    assert [t[0] for t in chars] == [canon.CH_STATE, canon.CH_BRAND_FIT, canon.CH_MODEL_FIT]
+
+
+def test_supplier_characteristics_survive_a_real_width_header():
+    """А на БОЙОВІЙ шапці (29 блоків) вистачає місця й характеристикам
+    постачальника — саме тому обрізання канонічним порядком безпечне."""
+    from common.prom_format import read_chars, write_chars
+    from adding.card_builder import build_fields
+
+    head = (EX_HEAD[:21]
+            + ["Назва_Характеристики", "Одиниця_виміру_Характеристики",
+               "Значення_Характеристики"] * canon.CHAR_SLOTS
+            + ["Вага,кг"])
+    prod = {"article": "34116792217", "name": "Диск гальмівний передній BMW 3 F30",
+            "brand": "BMW", "images": ["/a.jpg"],
+            "oe": [{"number": "34116792217", "is_oem": True}],
+            "cars": [{"brand": "BMW", "model": "3", "modification": "F30",
+                      "years": "2011-2018"}],
+            "details": {"Діаметр [мм]": "330"},
+            "nodes": "Гальма / Тормозные диски", "price": 2400}
+    f, _n, _i, chars, _p = build_fields(prod, use_ai=False)
+    got = read_chars(head, write_chars(head, [f.get(h, "") for h in head], chars))
+    names = [t[0] for t in got]
+    assert ("Діаметр", "мм", "330") in got
+    assert canon.CH_PART_CODE in names
+    assert names.index(canon.CH_PART_CODE) < names.index("Діаметр")
+
+
+def test_card_without_the_part_code_waits_in_staging(sh, monkeypatch):
+    """ЧЕТВЕРТИЙ запобіжник (27.07). «Код запчастини» — це поле, за яким Prom
+    підчіплює крос-довідник, тобто показує позицію тому, хто шукає за номером.
+    Картка без нього формально валідна — і саме тому мовчки лягала б у бойову
+    таблицю напівпорожньою. Тепер чекає в чернетці.
+
+    Валідатор ставить тут WARN, а не CRITICAL, теж свідомо: CRITICAL означає
+    `continue`, тобто позиція не потрапила б НІКУДИ — ні в Export, ні сюди."""
+    from adding.panel import read_panel
+    import adding.run as run
+
+    real = run.build_fields
+
+    def crippled(product, cand=None, use_ai=True):
+        f, name_ua, imgs, chars, price = real(product, cand=cand, use_ai=use_ai)
+        chars = [t for t in chars if t[0] != canon.CH_PART_CODE]
+        return f, name_ua, imgs, chars, price
+
+    monkeypatch.setattr(run, "build_fields", crippled)
+
+    _run_review(sh)
+    _take_all(sh)
+    run.do_enrich(sh, read_panel(sh))
+
+    assert sh.ws(EXPORT_TAB).get_all_values()[1:] == [], "картка без номера пішла в бойову"
+    assert "34116792217" in {r[0] for r in sh.ws(STAGING_TAB).get_all_values()[1:]}
+
+    rows = sh.ws(REVIEW_TAB).get_all_values()
+    i_st = rows[0].index("Статус")
+    line = [r[i_st] for r in rows[1:] if r[rows[0].index("Артикул")] == "34116792217"][0]
+    assert "канон" in line.lower() and "Staging" in line
+
+
+def _ai_on(sh, monkeypatch):
+    """Пульт із увімкненим ШІ + німий провайдер.
+
+    Провайдер мовчить навмисно: створення картки має лишитись таким самим, як у
+    решті сухих тестів, а перевіряємо ми тут ТРЕТІЙ крок — правку, — і його
+    видно лише тоді, коли решта не змінюється."""
+    from adding import ai_layer
+    from adding.panel import read_panel
+    monkeypatch.setattr(ai_layer, "_ai_call", lambda system, user: "")
+    st = read_panel(sh)
+    st["ai"] = "Повний"
+    return st
+
+
+def test_the_audit_findings_go_back_to_the_ai_as_a_fix(sh, monkeypatch):
+    """ТРЕТІЙ КРОК (27.07): «ШІ… буде це все перевіряти по жорсткій інструкції,
+    І ДОПОВНЮВАТИ, і робити повноцінну картку, яка одразу залітає вже в кабінет».
+
+    Досі аудит лише писав зауваження в колонку «Статус» — тобто знаходив роботу
+    і залишав її власникові. Тут перевіряється, що знайдене повертається моделі
+    наказом переписати, виправлений текст доїжджає до бойового рядка, а в звіті
+    видно «✍» — що саме машина переписала сама."""
+    import adding.run as run
+
+    st = _ai_on(sh, monkeypatch)
+    monkeypatch.setattr(run, "audit_card", lambda f, **kw: {
+        "verdict": "fix", "score": 40, "ai": True,
+        "issues": ["назва: немає моделі авто"]})
+
+    called = {}
+
+    def fake_repair(f, product, issues, use_ai=True):
+        called["issues"] = list(issues or ())
+        f["Назва_позиції_укр"] = "Диск гальмівний передній BMW 3 F30 34116792217"
+        return ["Назва_позиції_укр"]
+
+    monkeypatch.setattr(run, "repair_card", fake_repair)
+
+    _run_review(sh)
+    _take_all(sh)
+    run.do_enrich(sh, st)
+
+    assert called["issues"] == ["назва: немає моделі авто"], "зауваження не доїхали до правки"
+
+    head, *rows = sh.ws(EXPORT_TAB).get_all_values()
+    i_name = head.index("Назва_позиції_укр")
+    line = [r for r in rows if r[0] == "34116792217"][0]
+    assert line[i_name] == "Диск гальмівний передній BMW 3 F30 34116792217", \
+        "переписана назва не доїхала до бойового рядка"
+
+    rv = sh.ws(REVIEW_TAB).get_all_values()
+    i_st = rv[0].index("Статус")
+    status = [r[i_st] for r in rv[1:] if r[rv[0].index("Артикул")] == "34116792217"][0]
+    assert "✍" in status and "Назва_позиції_укр" in status, \
+        "у звіті не видно, що саме ШІ переписав сам"
+
+
+def test_the_card_is_checked_again_after_the_repair(sh, monkeypatch):
+    """«Після змін ще раз додаси позицію і перевірки все як в попередньому кроці
+    було, цей крок перевірки також додай».
+
+    Відповідь другого проходу — такий самий сирий текст від провайдера, як і
+    першого, і поблажок їй не робиться. Тут ШІ «виправляє» назву в порожнечу:
+    якби перевірки після правки не було, зіпсована картка мовчки лягла б у
+    бойову таблицю — і саме її побачив би покупець."""
+    import adding.run as run
+
+    st = _ai_on(sh, monkeypatch)
+    monkeypatch.setattr(run, "audit_card", lambda f, **kw: {
+        "verdict": "fix", "score": 40, "ai": True,
+        "issues": ["назва: немає моделі авто"]})
+
+    def spoiling_repair(f, product, issues, use_ai=True):
+        f["Назва_позиції_укр"] = ""
+        return ["Назва_позиції_укр"]
+
+    monkeypatch.setattr(run, "repair_card", spoiling_repair)
+
+    _run_review(sh)
+    _take_all(sh)
+    run.do_enrich(sh, st)
+
+    codes = {r[0] for r in sh.ws(EXPORT_TAB).get_all_values()[1:]}
+    assert "34116792217" not in codes, "зіпсована правкою картка потрапила в бойову"
+    # Ні в чернетку теж: назва порожня — це CRITICAL, а CRITICAL означає, що
+    # картки не існує, а не «покладемо десь поруч». Вкладки Staging може не
+    # бути взагалі — її створює лише перший рядок, який туди їде.
+    st_ws = sh.ws(STAGING_TAB)
+    staged = {r[0] for r in st_ws.get_all_values()[1:]} if st_ws else set()
+    assert "34116792217" not in staged, "зіпсована картка не мала осісти й у чернетці"
+
+    rv = sh.ws(REVIEW_TAB).get_all_values()
+    i_st = rv[0].index("Статус")
+    status = [r[i_st] for r in rv[1:] if r[rv[0].index("Артикул")] == "34116792217"][0]
+    assert "після правки" in status.lower(), f"незрозуміло, на чому спіткнулось: {status}"
 
 
 def test_second_run_does_not_duplicate_existing_codes(sh):
