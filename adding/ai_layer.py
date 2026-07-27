@@ -416,15 +416,25 @@ def enrich_facts(facts, thin=False):
         return None
 
 
+def card_facts(product, clean_details_fn, fitment_fn):
+    """Факти BM Parts у тому вигляді, у якому їх бачить ШІ.
+
+    Винесено окремо 27.07: рівно ті самі факти потрібні ДВІЧІ — на створення
+    картки і на другий прохід із зауваженнями (repair_fields). Дві копії цього
+    словника розійшлися б, і перевірка numbers_ok() почала б рахувати «вигадки»
+    від іншого набору дозволених номерів."""
+    oem, repl = oem_and_replacements(product)
+    # НІКОЛИ не додавати сюди ціну/собівартість/дилерські умови — це йде до третьої сторони.
+    return {"article": product.get("article"), "brand": product.get("brand"),
+            "name": product.get("name"), "nodes": product.get("nodes"),
+            "oem": oem[:10], "analogs": repl[:10],
+            "details": [{"name": n, "unit": u, "value": v} for (n, u, v) in clean_details_fn(product)],
+            "fitment": fitment_fn(product, product.get("name") or "")}
+
+
 def ai_enrich(product, clean_details_fn, fitment_fn, thin=False):
     """Факти BM Parts -> JSON з 10 полями або None."""
-    oem, repl = oem_and_replacements(product)
-    facts = {"article": product.get("article"), "brand": product.get("brand"),
-             "name": product.get("name"), "nodes": product.get("nodes"),
-             "oem": oem[:10], "analogs": repl[:10],
-             "details": [{"name": n, "unit": u, "value": v} for (n, u, v) in clean_details_fn(product)],
-             "fitment": fitment_fn(product, product.get("name") or "")}
-    return enrich_facts(facts, thin=thin)
+    return enrich_facts(card_facts(product, clean_details_fn, fitment_fn), thin=thin)
 
 
 def merge_ai(f, ai):
@@ -503,7 +513,13 @@ _AUDIT_FIELDS = ("Назва_позиції", "Назва_позиції_укр"
 _AUDIT_TECH = {"Назва_групи": "Група_назва",
                "Виробник": "Виробник",
                "Код_маркування_(GTIN)": "GTIN",
-               "Вага,кг": "Вага_кг"}
+               "Вага,кг": "Вага_кг",
+               # 27.07-bis. Правило `section` має who='обидва', тобто вимога
+               # перевірити підрозділ у промпті СТОЯЛА — а самих полів у payload
+               # не було. Модель просили подивитись на те, чого їй не показали:
+               # у кращому разі вона мовчала, у гіршому вигадувала зауваження.
+               "Ідентифікатор_підрозділу": "Підрозділ_ID",
+               "Посилання_підрозділу": "Підрозділ_посилання"}
 # А ЦЬОГО назовні немає й не буде: ціна, собівартість, валюта, наявність,
 # кількість. Наявність не йде свідомо — єдине правило про неї («в наявності»
 # лише при відправці ≤3 днів) є чиста арифметика, її рахує код
@@ -525,13 +541,18 @@ def audit_on():
     return v not in ("0", "false", "off", "ні", "нi", "no", "без")
 
 
-def _audit_payload(f, chars=None, images=None, article="", group=""):
+def _audit_payload(f, chars=None, images=None, article="", group="", known=()):
     """Картка -> факти для аудиту. Без цін, без собівартості, без наявності.
 
     27.07 payload розширено з 10 текстових полів до ВСІЄЇ картки, крім грошей:
     додались назва групи, виробник, GTIN, вага і справжні адреси фото (раніше
     їхала сама кількість — за числом «3» неможливо помітити, що всі три знімки
-    ведуть на чужий артикул)."""
+    ведуть на чужий артикул).
+
+    known — те, що код УЖЕ порахував сам (перевірки за каноном з validator.py).
+    Йде в payload окремим списком свідомо: модель має право повернути лише 6
+    зауважень, і якщо вона витратить їх на переказ того, що й так порахував
+    код, місця на власне спостереження не лишиться."""
     f = f or {}
     card = {}
     for k in _AUDIT_FIELDS:
@@ -556,6 +577,9 @@ def _audit_payload(f, chars=None, images=None, article="", group=""):
                 if u.strip()]
     card["Фото"] = urls[:_AUDIT_IMG_MAX]
     card["Фото_всього"] = len(urls)
+    kn = [_clip(k) for k in (known or ()) if str(k or "").strip()]
+    if kn:
+        card["Вже_знайшов_код"] = kn[:_AUDIT_MAX_ISSUES]
     return card
 
 
@@ -602,7 +626,16 @@ def _norm_audit(raw):
     return {"verdict": verdict, "score": score, "issues": issues}
 
 
-def audit_card(f, chars=None, images=None, article="", group="", use_ai=True):
+def _canon_only(known):
+    """Результат без ШІ: самі лише знахідки коду. Потрібен, бо канон мусить бути
+    видно ЗАВЖДИ — і коли ключів нема, і коли вичерпано квоту."""
+    kn = [_clip(k) for k in (known or ()) if str(k or "").strip()]
+    if not kn:
+        return None
+    return {"verdict": "fix", "score": 0, "issues": kn[:_AUDIT_MAX_ISSUES], "ai": False}
+
+
+def audit_card(f, chars=None, images=None, article="", group="", known=(), use_ai=True):
     """Друга думка ШІ про ГОТОВУ картку. Повертає dict або None.
 
     None — це НЕ помилка й не «картка погана». Це штатний стан: нема ключів,
@@ -610,38 +643,155 @@ def audit_card(f, chars=None, images=None, article="", group="", use_ai=True):
     Викликач у такому разі просто нічого не дописує в статус і публікує картку
     так само, як публікував би без ШІ взагалі.
 
+    known — знахідки коду за каноном (validator.validate_canon). Вони їдуть у
+    payload, щоб модель не переказувала їх замість власних спостережень, і вони
+    ж лишаються у відповіді, навіть якщо ШІ не відповів узагалі: розбіжність із
+    канонічною таблицею — це ФАКТ, порахований кодом, і зникати разом із
+    провайдером він не має права.
+
     Словник f НЕ змінюється — навмисно: аудит не має права правити картку, бо
     правки нікому було б перевірити. Він тільки називає проблему словами."""
     if not use_ai or not audit_on():
-        return None
-    facts = _audit_payload(f, chars=chars, images=images, article=article, group=group)
+        return _canon_only(known)
+    facts = _audit_payload(f, chars=chars, images=images, article=article,
+                           group=group, known=known)
     payload = json.dumps(facts, ensure_ascii=False, sort_keys=True)
     if payload in _audit_memo:
         return _audit_memo[payload]
     try:
         txt = _ai_call(AUDIT_SYSTEM, payload)
         if not txt:
-            return None
+            return _canon_only(known)
         mt = re.search(r"\{.*\}", txt, re.S)
         if not mt:
-            return None
+            return _canon_only(known)
         res = _norm_audit(json.loads(mt.group(0)))
     except Exception as e:
         print(f"[ai] аудит пропущено ({str(e)[:100]})")
-        return None
-    if res is not None:
-        _audit_memo[payload] = res
+        return _canon_only(known)
+    if res is None:
+        return _canon_only(known)
+    # Знахідки коду йдуть ПЕРШИМИ: вони точні, а зауваження моделі — дорадчі.
+    kn = [_clip(k) for k in (known or ()) if str(k or "").strip()]
+    merged, seen = [], set()
+    for it in kn + res["issues"]:
+        low = it.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        merged.append(it)
+    res["issues"] = merged[:_AUDIT_MAX_ISSUES]
+    res["ai"] = True
+    if res["issues"]:
+        res["verdict"] = "fix"
+    _audit_memo[payload] = res
     return res
+
+
+# ======================================================================== #
+#                   ДРУГИЙ ПРОХІД: ШІ ДОПОВНЮЄ ЗА ЗАУВАЖЕННЯМИ             #
+# ======================================================================== #
+# Вимога власника 27.07: ШІ мусить не лише перевіряти, а й «доповнювати, і
+# робити повноцінну картку, яка одразу залітає вже в кабінет». Дотепер аудит
+# знаходив проблему — і на цьому все закінчувалось: зауваження лягало в колонку
+# «Статус», а картка їхала в Export такою, як була.
+#
+# ЩО ЦЕЙ ПРОХІД МОЖЕ І ЧОГО НЕ МОЖЕ. Він переписує РІВНО ті самі 10 текстових
+# полів, які ШІ й так автор (merge_ai), — назви, ключовики, описи, мету. Групи,
+# ціни, наявності, характеристик, фото він не торкається ФІЗИЧНО: merge_ai не
+# вміє писати в ці ключі. Це і є примирення з ПРАВИЛА §8 — заборона там не про
+# «ШІ не має думати», а про «ШІ не має РУКИ» до технічних полів. Розбіжність із
+# каноном не лікується текстом і йде на ручну курацію в Staging_Prom.
+#
+# Після правки картка ще раз проходить enforce_limits() і валідатор — останнє
+# слово лишається за кодом, як і було.
+_REPAIR_TAIL = (
+    "\n\nЦЕ ДРУГИЙ ПРОХІД. У полі «поточна_картка» — те, що вже написано, у полі "
+    "«зауваження» — що з цим не так. Перепиши поля так, щоб зауваження зникли, а "
+    "все інше лишилось як є. Нових номерів, кузовів і років НЕ вигадуй: бери "
+    "тільки те, що є у фактах."
+)
+REPAIR_SYSTEM = PROM_AI_SYSTEM + _REPAIR_TAIL
+
+# Зауваження, за якими ШІ має право переписувати. Ключ — перше слово рядка
+# «поле: чому» (формат задає rules.audit_system()). Усе інше — група, підрозділ,
+# характеристики, вага, фото — свідомо НЕ тут: це технічні поля, їх ШІ не
+# чіпає, і картка з такою проблемою їде на ручну курацію.
+_REPAIR_FIELDS = ("назва", "мета", "запити", "опис", "пошук", "заголовок")
+_REPAIR_TEXT = {"Назва_позиції", "Назва_позиції_укр", "Пошукові_запити",
+                "Пошукові_запити_укр", "Опис", "Опис_укр", "HTML_заголовок",
+                "HTML_заголовок_укр", "HTML_опис", "HTML_опис_укр"}
+_fix_memo = {}
+
+
+def repair_on():
+    """AI_FIX=0 — вимкнути другий прохід. Він додає ТРЕТІЙ запит на позицію
+    (створення + аудит + правка), а добова квота безкоштовних провайдерів
+    рахується поштучно. Типово увімкнено — власник просив повноцінну картку."""
+    v = (os.environ.get("AI_FIX") or "1").strip().lower()
+    return v not in ("0", "false", "off", "ні", "нi", "no", "без")
+
+
+def repairable(issues):
+    """Зауваження -> лише ті, які лікуються переписуванням тексту.
+
+    Рядки без префікса «поле:» (а такі дає перевірка коду за каноном) сюди НЕ
+    потрапляють навмисно: «групи 999 немає в довіднику» не лікується красивішим
+    описом, і просити модель це «виправити» — значить отримати вигадку."""
+    out = []
+    for it in issues or ():
+        head = str(it).split(":", 1)[0].strip().lower()
+        if head in _REPAIR_FIELDS:
+            out.append(str(it))
+    return out
+
+
+def repair_fields(facts, issues, current=None, thin=False):
+    """Факти + поточні тексти + зауваження -> ті самі 10 полів або None.
+
+    None означає «лишаємо як було»: нема ключів, вичерпано квоту, модель
+    відповіла не JSON або вигадала номер, якого нема у фактах. Жоден із цих
+    випадків не має права зупинити публікацію."""
+    fixes = repairable(issues)
+    if not fixes:
+        return None
+    now = {k: str(v) for k, v in (current or {}).items() if k in _REPAIR_TEXT and v}
+    payload = json.dumps({"факти": facts, "поточна_картка": now, "зауваження": fixes},
+                         ensure_ascii=False, sort_keys=True)
+    if payload in _fix_memo:
+        return _fix_memo[payload]
+    try:
+        txt = _ai_call(REPAIR_SYSTEM if not thin else PROM_AI_SYSTEM_THIN + _REPAIR_TAIL,
+                       payload)
+        if not txt:
+            return None
+        mt = re.search(r"\{.*\}", txt, re.S)
+        ai = json.loads(mt.group(0)) if mt else None
+        if not ai:
+            return None
+        if not numbers_ok(ai, facts):
+            return None
+    except Exception as e:
+        print(f"[ai] правку пропущено ({str(e)[:100]})")
+        return None
+    _fix_memo[payload] = ai
+    return ai
 
 
 def audit_line(res):
     """Один короткий рядок для колонки «Статус» в «Огляд_Додавання».
 
-    Префікс «ШІ:» тут обов'язковий: у тій самій клітинці вже стоїть вердикт
-    валідатора, і власник має з першого погляду бачити, де порахував код (це
-    факт), а де висловився ШІ (це думка, яку можна й проігнорувати)."""
+    Префікс обов'язковий, і їх ДВА. «ШІ:» — коли відповіла модель (це думка,
+    яку можна й проігнорувати). «Канон:» — коли модель промовчала, а рядок усе
+    одно є: значить, розбіжність із канонічною таблицею порахував код, і це
+    факт. Плутати ці два джерела не можна, бо власник має з першого погляду
+    бачити, кому вірити."""
     if not res:
         return ""
+    # Типово «ШІ»: ключ 'ai' ставить лише той, хто знає протилежне
+    # (_canon_only). Так старі виклики, що складали словник руками, лишаються
+    # підписані так само, як були.
+    tag = "ШІ" if res.get("ai", True) else "Канон"
     if res["verdict"] == "ok" and not res["issues"]:
-        return "ШІ: ок"
-    return "ШІ: " + "; ".join(res["issues"][:3])
+        return f"{tag}: ок"
+    return f"{tag}: " + "; ".join(res["issues"][:3])

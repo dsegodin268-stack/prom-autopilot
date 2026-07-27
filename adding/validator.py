@@ -10,6 +10,7 @@
 #   перевіряв третю — мовчки.
 import re
 
+from adding import canon, rules
 from adding.rules import (AVAIL_MAX_DAYS_IN_STOCK, CHARS_MIN, CITIES, DESC_MAX, DESC_MIN,
                           DESC_TEXT_MIN, DESC_TEXT_SOFT_MAX, GTIN_LENGTHS, KW_BAD, KW_MAX,
                           KW_MIN, META_DESC_MAX, META_TITLE_MAX, META_TITLE_WORDS_MAX,
@@ -261,6 +262,70 @@ def validate_images(urls):
     return out
 
 
+def validate_canon(card, is_part=True):
+    """ПЕРЕВІРКА ЗА КАНОНОМ (27.07) — довідники з adding/canon.py, зчитані з
+    бойової вкладки експорту. Власник сказав прямо: «таблицю експорту треба
+    взяти як канонічну таблицю для наповнення товару… заклади це як канонічний
+    шаблон, якого треба притримуватися». Дотепер ці п'ять перевірок існували в
+    rules.py, але їх НІХТО не викликав — тобто канон був документом, а не
+    воротами.
+
+    Рівні тут вибрані не за суворістю формулювання, а за тим, що станеться далі:
+
+      • групи / підрозділу НЕМА взагалі -> WARN. Це не аварія, це «оберіть
+        руками»: run.py сам відправить таку картку в Staging_Prom. CRITICAL
+        убив би її ще до маршрутизації, і позиція не потрапила б НІКУДИ.
+      • ID є, але його НЕМА в довіднику -> CRITICAL. Неіснуючий номер ламає
+        імпорт УСЬОГО файлу, а не однієї позиції. Наш код такого ID не
+        породжує, тож він може взятися лише з правки руками або з бага —
+        і в бойову таблицю такий рядок не піде.
+      • батьківська група -> WARN-порада. Власник сам тримає 47 позицій прямо
+        в «Амортизаторы», тож це привід перевірити, а не брак.
+      • характеристики й «Код запчастини» -> WARN + окремий запобіжник у
+        run.py, який відправляє картку в чернетку. Знову ж таки: краще
+        чернетка, ніж мовчазне зникнення позиції.
+    """
+    flags = []
+
+    gid = str(card.get("group_id") or "").strip()
+    if gid:
+        problem = rules.group_problem(gid)
+        if problem:
+            flags.append(("group", CRITICAL, "canon_group", problem))
+        else:
+            note = rules.group_note(gid)
+            if note:
+                flags.append(("group", WARN, "canon_group_deep", note))
+
+    # Друга вісь — розділ каталогу самого Prom. Перевіряється, лише якщо поле
+    # передали: старі виклики validate_card() про підрозділ нічого не знають.
+    if "section_id" in card:
+        sid = str(card.get("section_id") or "").strip()
+        url = str(card.get("section_url") or "").strip()
+        if not sid:
+            flags.append(("section", WARN, "canon_section_empty",
+                          "Підрозділ маркетплейсу не вказаний — картка на ручну курацію"))
+        elif not canon.section_exists(sid):
+            flags.append(("section", CRITICAL, "canon_section",
+                          rules.section_problem(sid, url)))
+        else:
+            problem = rules.section_problem(sid, url)
+            if problem:
+                flags.append(("section", WARN, "canon_section_url", problem))
+
+    # Обов'язковий набір характеристик і «Код запчастини» — вимоги Prom саме до
+    # ЗАПЧАСТИН, тому для іншого товару їх не питаємо.
+    if is_part:
+        problem = rules.chars_problem(card.get("chars"))
+        if problem:
+            flags.append(("char", WARN, "canon_chars", problem))
+        problem = rules.part_code_problem(card.get("chars"), card.get("product_id"))
+        if problem:
+            flags.append(("char", WARN, "canon_part_code", problem))
+
+    return flags
+
+
 def validate_card(card, is_part=True, level=1):
     """card: dict(name, description, chars, images, price, group_id, product_id).
     Повертає список (field, level, code, message).
@@ -319,6 +384,9 @@ def validate_card(card, is_part=True, level=1):
     if "avail" in card:
         for f in validate_availability(card.get("avail"), card.get("days")):
             flags.append(("avail",) + f)
+    # КАНОН — останнім, щоб у summarize() ці коди стояли поруч і в звіті було
+    # видно одним оком, картка розійшлася з довідником чи ні.
+    flags.extend(validate_canon(card, is_part=is_part))
     return flags
 
 

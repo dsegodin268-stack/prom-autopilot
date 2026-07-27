@@ -22,7 +22,7 @@ from common.normalize import num
 from common.prom_format import write_chars
 from common.sheets import find_ws, keyf, open_hub
 from adding.ai_layer import audit_card, audit_line
-from adding.card_builder import build_fields, product_from_candidate
+from adding.card_builder import build_fields, product_from_candidate, repair_card
 from adding.completeness import level, route
 from adding.panel import ensure_panel, read_panel, write_status
 from adding.review import do_review, parse_avail
@@ -41,6 +41,29 @@ def _row_from_fields(ex_head, f, chars):
     (common/prom_format.py сам розбирає, трійки там чи пари)."""
     row = [f.get(h, "") for h in ex_head]
     return write_chars(ex_head, row, chars)
+
+
+def _valid_card(f, chars, imgs, price, art):
+    """Поля картки в тому вигляді, у якому їх бачить валідатор.
+
+    Винесено окремо 27.07: після другого проходу ШІ (repair_card) тексти в `f`
+    змінюються, і картку треба перевірити ЩЕ РАЗ — тими самими воротами, а не
+    полегшеними. Дві копії цього словника неминуче розійшлися б, і перевірка
+    після правки почала б відрізнятися від перевірки до неї."""
+    return {"name": f.get("Назва_позиції_укр"), "description": f.get("Опис_укр"),
+            "chars": chars, "images": imgs, "price": price,
+            "product_id": art, "group_id": f.get("Номер_групи"),
+            # meta_title / meta_desc / keywords додано 27.07: без них валідатор
+            # не бачив половини чекліста §10 — довжину мета-полів, кількість
+            # ключовиків, наявність каталожного номера в меті.
+            "meta_title": f.get("HTML_заголовок_укр"),
+            "meta_desc": f.get("HTML_опис_укр"),
+            "keywords": f.get("Пошукові_запити_укр"),
+            # Друга вісь — розділ каталогу Prom. Передаємо ОБИДВА поля:
+            # валідатор звіряє посилання з ідентифікатором, бо в бойовій
+            # таблиці вони мусять описувати той самий розділ.
+            "section_id": f.get("Ідентифікатор_підрозділу"),
+            "section_url": f.get("Посилання_підрозділу")}
 
 
 def _cand_from_row(head_i, r):
@@ -144,24 +167,17 @@ def do_enrich(sh, st):
                     c["qty"] = int(num(qt)) if c["presence"] == "available" else 0
 
             prod = product_from_candidate(c)
-            f, name_ua, imgs, details, price = build_fields(prod, cand=c, use_ai=use_ai)
+            f, name_ua, imgs, chars, price = build_fields(prod, cand=c, use_ai=use_ai)
 
             # --- ВАЛІДАТОР на воротах (ПРАВИЛА §10) ---
             # Рівень рахуємо ДО валідації: картці рівня 3 брак фото ставиться в
             # провину лише як WARN, бо вона й так їде в чернетку «чекає фото».
             # Інакше валідатор відхиляв би її тут і позиція гинула б мовчки.
             lv = level(c)
-            # meta_title / meta_desc / keywords додано 27.07: без них валідатор
-            # не бачив половини чекліста §10 — довжину мета-полів, кількість
-            # ключовиків, наявність каталожного номера в меті.
-            card = {"name": f.get("Назва_позиції_укр"), "description": f.get("Опис_укр"),
-                    "chars": details, "images": imgs, "price": price,
-                    "product_id": art, "group_id": f.get("Номер_групи"),
-                    "meta_title": f.get("HTML_заголовок_укр"),
-                    "meta_desc": f.get("HTML_опис_укр"),
-                    "keywords": f.get("Пошукові_запити_укр")}
+            card = _valid_card(f, chars, imgs, price, art)
             flags = validate_card(card, is_part=True, level=lv)
             verdict = summarize(flags)
+            codes = {c for (_fl, _lv, c, _m) in flags}
             if worst_level(flags) == CRITICAL:
                 mark[rn] = f"відхилено валідатором: {verdict[:90]}"
                 print(f"[add] ⛔ {art}: {verdict}")
@@ -169,13 +185,54 @@ def do_enrich(sh, st):
 
             # --- ДРУГА ДУМКА ШІ (дорадча, ПРАВИЛА §10 + Google) ---
             # Іде ПІСЛЯ валідатора і лише для карток, які вже пройшли: на
-            # відхиленій витрачати добову квоту немає сенсу. Результат ніде далі
-            # не читається, крім рядка статусу, — маршрут «Export чи Staging»
-            # рахує код. Нема ключів / вичерпано квоту / провайдер мовчить ->
-            # audit_line порожній, і конвеєр працює точно так само, як досі.
-            ai_note = audit_line(audit_card(f, chars=details, images=imgs,
-                                            article=art, group=f.get("Номер_групи"),
-                                            use_ai=use_ai))
+            # відхиленій витрачати добову квоту немає сенсу. Нема ключів /
+            # вичерпано квоту / провайдер мовчить -> audit_line порожній, і
+            # конвеєр працює точно так само, як досі.
+            # known — те, що вже порахував валідатор за каноном. Передається
+            # свідомо: модель має право лише на 6 зауважень, і хай витрачає їх
+            # на те, чого код не бачить, а не на переказ довідника. Плюс ці
+            # рядки лишаються у відповіді, навіть якщо ШІ мовчить, — розбіжність
+            # із канонічною таблицею мусить бути видно завжди.
+            canon_notes = [m for (_fl, _lv, c, m) in flags if c.startswith("canon_")]
+            audit = audit_card(f, chars=chars, images=imgs, article=art,
+                               group=f.get("Номер_групи"), known=canon_notes,
+                               use_ai=use_ai)
+
+            # --- ТРЕТІЙ КРОК: ШІ ДОПОВНЮЄ, А НЕ ЛИШЕ СВІТИТЬ ЧЕРВОНИМ ---
+            # Вимога власника: «ШІ… буде це все перевіряти по жорсткій
+            # інструкції, І ДОПОВНЮВАТИ, і робити повноцінну картку, яка одразу
+            # залітає вже в кабінет». Досі аудит лише писав зауваження в рядок
+            # статусу — тобто робота лишалася власникові. Тепер знайдене
+            # віддається назад моделі з наказом переписати рівно ті поля.
+            #
+            # Торкається ВИКЛЮЧНО 10 текстових полів (назви, описи, мета,
+            # пошукові): merge_ai фізично не вміє писати в інші ключі, а
+            # repairable() ще й відсіює зауваження без префікса «поле:». Тому
+            # ціна, наявність, група, характеристики й фото лишаються такими,
+            # якими їх порахував код, — ПРАВИЛА §8 не порушені.
+            fixed = []
+            if audit and audit.get("verdict") == "fix":
+                fixed = repair_card(f, prod, audit.get("issues"), use_ai=use_ai)
+            if fixed:
+                # ПЕРЕВІРКА ПІСЛЯ ПРАВКИ — та сама, не полегшена. Відповідь
+                # другого проходу така сама сира, як і першого: якщо модель
+                # «виправила» назву в 300 символів, це має спливти ТУТ, а не
+                # у відмові Prom. Тому цикл повний: валідатор -> аудит.
+                card = _valid_card(f, chars, imgs, price, art)
+                flags = validate_card(card, is_part=True, level=lv)
+                verdict = summarize(flags)
+                codes = {c for (_fl, _lv, c, _m) in flags}
+                if worst_level(flags) == CRITICAL:
+                    mark[rn] = f"відхилено після правки ШІ: {verdict[:80]}"
+                    print(f"[add] ⛔ {art}: після правки {verdict}")
+                    continue
+                canon_notes = [m for (_fl, _lv, c, m) in flags if c.startswith("canon_")]
+                audit = audit_card(f, chars=chars, images=imgs, article=art,
+                                   group=f.get("Номер_групи"), known=canon_notes,
+                                   use_ai=use_ai)
+            ai_note = audit_line(audit)
+            if fixed:
+                ai_note = (ai_note + " | " if ai_note else "") + f"✍ {', '.join(fixed)}"
 
             dest, status = route(c, st["target"])
             # Запобіжник: навіть якщо рівень порахувався оптимістично, картка
@@ -190,7 +247,26 @@ def do_enrich(sh, st):
             # власник обере групу руками.
             if dest == "export" and not f.get("Номер_групи"):
                 dest, status = "staging", "нема групи — обрати вручну"
-            row = _row_from_fields(ex_head, f, details)
+            # І те саме для ДРУГОЇ осі (27.07). Група — це вітрина магазину,
+            # а «підрозділ» — розділ каталогу самого Prom: у бойовій таблиці він
+            # заповнений на 3960/3960 позицій, і без нього картка є на сайті
+            # магазину, але її нема в маркетплейсному пошуку — тобто там, де її
+            # шукає покупець. Ідентифікатор теж не вигадується.
+            if dest == "export" and not f.get("Ідентифікатор_підрозділу"):
+                dest, status = "staging", "нема підрозділу — обрати вручну"
+            # І ЧЕТВЕРТИЙ запобіжник — за каноном (27.07). Таблиця експорту
+            # оголошена канонічним шаблоном, а в ній у кожної запчастини є
+            # обов'язковий набір характеристик і «Код запчастини»: саме за цим
+            # полем Prom підчіплює крос-довідник, тобто показує позицію тому,
+            # хто шукає за номером. Картка без нього формально валідна — і саме
+            # тому мовчки лягала б у бойову таблицю напівпорожньою. Тепер чекає
+            # в чернетці. Рівень WARN, а не CRITICAL, теж свідомо: CRITICAL у
+            # валідаторі означає `continue`, тобто позиція зникла б узагалі.
+            if dest == "export" and ("canon_chars" in codes or "canon_part_code" in codes):
+                why = "; ".join(m for (_fl, _lv, c, m) in flags
+                                if c in ("canon_chars", "canon_part_code"))
+                dest, status = "staging", f"не за каноном: {why[:70]}"
+            row = _row_from_fields(ex_head, f, chars)
             (to_export if dest == "export" else to_staging).append(row)
             seen.add(k)
             mark[rn] = (f"{status} → {'Export' if dest == 'export' else 'Staging'}"
@@ -198,7 +274,7 @@ def do_enrich(sh, st):
                         + (f" | {ai_note[:120]}" if ai_note else ""))
             print(f"[add] ✅ {art} | рівень {lv} | {name_ua[:38]} | ціна {price} | "
                   f"наяв {f.get('Наявність','')} к-ть {f.get('Кількість','')} | "
-                  f"х-к {len(details)} | фото {len(imgs)} | -> {dest} | {verdict}"
+                  f"х-к {len(chars)} | фото {len(imgs)} | -> {dest} | {verdict}"
                   + (f" | {ai_note}" if ai_note else ""))
         except Exception as e:
             mark[rn] = "помилка"

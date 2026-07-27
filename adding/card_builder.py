@@ -10,8 +10,9 @@ from common.bmparts_client import (cdn_url, clean_name, fitment_lines, oem_and_r
                                    parse_details)
 from common.pricing import final_price
 from repricing.export_writer import avail_cell
-from adding.ai_layer import ai_enrich, merge_ai
-from adding.groups import map_group
+from adding.ai_layer import ai_enrich, card_facts, merge_ai, repair_fields, repair_on
+from adding import canon
+from adding.groups import map_place
 # Жорсткі межі Prom і Google лежать РІВНО В ОДНОМУ місці — adding/rules.py.
 # Доти кожне число було записане тричі: тут (шлюз), у валідаторі й руками в
 # промпті аудиту. Три копії одного числа розходяться завжди, і розходились:
@@ -176,6 +177,168 @@ def _name_for_prom(raw, art):
     if art and art.lower() not in n.lower():
         n = f"{n} {art}"
     return clean_name(n)[:NAME_MAX]
+
+
+# ---------- Характеристики за каноном (adding/canon.py) ----------
+# Досі в картку їхали ЛИШЕ характеристики з details BM Parts — тобто те, що
+# постачальник поклав у свій каталог. Але Prom має ВЛАСНИЙ обов'язковий набір, і
+# головна в ньому — «Код запчастини»: саме вона чіпляє позицію до крос-довідника
+# маркетплейсу, після чого Prom САМ малює блоки «Сумісний транспорт» і
+# «Оригінальні номери». Без неї покупець не знаходить позицію за каталожним
+# номером ніде, крім тексту опису, — а це і був головний закид власника.
+#
+# Значення тут не вигадуються: марка, моделі, роки й кроси беруться з фактів
+# BM Parts, а назви характеристик і їхній порядок — з canon.py, зчитаного з
+# бойової таблиці. Чого нема у фактах — лишається порожнім, і canon.order_chars()
+# такий блок просто викидає.
+
+_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+_RANGE_RE = re.compile(r"((?:19|20)\d{2})\s*[-–—]\s*((?:19|20)\d{2})")
+_YEARS_MAX = 20
+
+# Місце встановлення — з назви позиції. Стем, а не ціле слово: «передний»,
+# «передній», «передня», «передние» — це одне й те саме місце.
+_PLACES = (("передн", "Передній"), ("задн", "Задній"),
+           ("лів", "Лівий"), ("лев", "Лівий"), ("прав", "Правий"),
+           ("верхн", "Верхній"), ("нижн", "Нижній"))
+
+# Марки АВТО (не брендів деталей). Потрібні рівно для одного рішення:
+# «Тип запчастини» = Оригінал чи Аналог. Febi чи MANN — теж бренд, але деталь
+# їхнього виробництва оригіналом не є, і писати покупцю протилежне не можна.
+_CAR_MAKES = frozenset((
+    "bmw", "bmw motorrad", "mini", "audi", "volkswagen", "vw", "vag",
+    "mercedes-benz", "mercedes", "porsche", "porshe", "porcher",
+    "land rover", "jaguar", "lexus", "toyota", "volvo", "skoda", "seat",
+))
+
+
+def _solid(s):
+    """Каталожний номер СУЦІЛЬНО: 11427953129, а не «11 42 7 953 129».
+
+    Пряма вимога власника і водночас технічна: з пробілами крос-довідник Prom
+    номер не впізнає, а Google не склеює його з тим, що набирає покупець."""
+    return re.sub(r"[\s\-–—]+", "", str(s or "")).strip()
+
+
+def _fit_brand(product, cand, fits):
+    """Марка АВТО для «Сумісність з маркою».
+
+    Це не те саме, що «Виробник»: там бренд деталі. Марку авто дає перший токен
+    рядка сумісності («BMW 3 G20 B48 2018+»), бо cars[] у BM Parts складається
+    саме в такому порядку; якщо сумісності нема — латинський токен із назви."""
+    for line in fits:
+        w = str(line or "").split()
+        if w and re.match(r"^[A-Za-z]", w[0]):
+            return w[0]
+    cars = _car_tokens(_display_name(product.get("name")))
+    if cars:
+        return cars[0]
+    return str(product.get("brand") or (cand or {}).get("brand") or "").strip()
+
+
+def _model_of(line, brand):
+    """«BMW 3 G20 B48 2018+» -> «3 G20». Модель плюс код кузова, якщо він поряд.
+
+    Далі не беремо свідомо: наступний токен — це вже код двигуна (B48), і в
+    полі «Сумісність з моделлю» він робить значення, за яким ніхто не фільтрує."""
+    w = [x for x in re.sub(r"\s+", " ", str(line or "")).strip().split() if x]
+    if w and brand and w[0].lower() == str(brand).lower():
+        w = w[1:]
+    w = [x for x in w if not _YEAR_RE.search(x) and x != "+"]
+    if not w:
+        return ""
+    model = w[0]
+    if len(w) > 1 and re.match(r"^[A-Za-z]\d{2,3}$", w[1]):
+        model = f"{model} {w[1]}"
+    return model.strip(" ,.-")
+
+
+def _models(fits, brand):
+    return [m for m in (_model_of(l, brand) for l in fits) if m]
+
+
+def _years(fits):
+    """Роки випуску списком: «2010-2015» -> 2010|2011|…|2015.
+
+    Фасетний фільтр Prom шукає КОНКРЕТНИЙ рік, тому діапазон розкривається.
+    Відкритий діапазон («2018+») лишається однією позначкою: домальовувати йому
+    кінець означало б написати покупцю рік, якого ми не знаємо."""
+    out = []
+    for line in fits:
+        s = str(line or "")
+        used = []
+        for m in _RANGE_RE.finditer(s):
+            a, b = int(m.group(1)), int(m.group(2))
+            if 0 <= b - a <= _YEARS_MAX:
+                out += [str(y) for y in range(a, b + 1)]
+                used.append(m.group(0))
+        for u in used:
+            s = s.replace(u, " ")
+        out += _YEAR_RE.findall(s)
+    return out[:_YEARS_MAX * 2]
+
+
+def _places(name):
+    low = str(name or "").lower()
+    out = []
+    for stem, val in _PLACES:
+        if stem in low and val not in out:
+            out.append(val)
+    return out
+
+
+def _cross(oem, repl, art):
+    """Кросс-номери: OEM + номери замінників, БЕЗ власного артикула.
+
+    Свій же номер у списку крос-номерів — це «ця деталь замінюється сама на
+    себе»: Prom показує його покупцю в блоці аналогів і картка виглядає
+    зламаною. Роздільник тут «;», а не «|», — у Prom вони різні."""
+    a = _solid(art)
+    out = []
+    for v in list(oem or []) + [_part_token(r) for r in (repl or [])]:
+        s = _solid(v)
+        if s and s.upper() != a.upper():
+            out.append(s)
+    return out[:20]
+
+
+def _is_original(product, art, oem, brand_fit):
+    """Оригінал чи аналог. Помилка тут коштує дорого в обидва боки: назвати
+    аналог оригіналом — обман покупця, назвати оригінал BMW аналогом —
+    втрачений продаж, бо саме за словом «оригінал» його й шукають."""
+    a = _solid(art)
+    if a and any(_solid(o).upper() == a.upper() for o in (oem or [])):
+        return True
+    b = str(product.get("brand") or "").strip().lower()
+    return bool(b) and (b in _CAR_MAKES or b == str(brand_fit or "").strip().lower())
+
+
+def canon_chars(product, cand=None, details=None):
+    """Повний канонічний набір характеристик картки автозапчастини.
+
+    Спершу канонічні блоки Prom, потім характеристики постачальника. Порядок
+    робить canon.order_chars(): він же схлопує дублі (перший виграє, тобто наш
+    канонічний блок б'є однойменний блок BM Parts), викидає порожні значення й
+    ріже хвіст до 29 блоків — стільки їх у бойовій шапці, решту
+    common/prom_format.write_chars відкидає МОВЧКИ."""
+    art = _solid(product.get("article") or (cand or {}).get("article"))
+    name = _display_name(product.get("name"))
+    fits = _fitment(product, name)
+    brand_fit = _fit_brand(product, cand, fits)
+    oem, repl = oem_and_replacements(product)
+    ch = [
+        (canon.CH_STATE, "", canon.VAL_STATE_NEW),
+        (canon.CH_BRAND_FIT, "", brand_fit),
+        (canon.CH_MODEL_FIT, "", canon.join_multi(_models(fits, brand_fit))),
+        (canon.CH_YEARS, "", canon.join_multi(_years(fits))),
+        (canon.CH_PART_TYPE, "", canon.part_type_value(
+            _is_original(product, art, oem, brand_fit))),
+        (canon.CH_PART_CODE, "", art),
+        (canon.CH_CROSS, "", canon.join_cross(_cross(oem, repl, art))),
+        (canon.CH_TECH, "", canon.VAL_TECH_CAR),
+        (canon.CH_PLACE, "", canon.join_multi(_places(product.get("name")))),
+    ]
+    return canon.order_chars(ch + list(details or []))
 
 
 # ---------- Опис (ПРАВИЛА §3a) ----------
@@ -505,7 +668,9 @@ def build_fields(product, cand=None, use_ai=True):
     if cand and cand.get("presence") != "available":
         qty = 0
     avail, qty_cell = avail_cell(qty, days if cand else 15)
-    gid, gname = map_group(product)
+    gid, gname, sid, surl = map_place(product)
+    brand = product.get("brand") or (cand or {}).get("brand") or ""
+    chars = canon_chars(product, cand=cand, details=details)
     f = {"Код_товару": art, "Ідентифікатор_товару": art,
          "Назва_позиції": name_ru or name_ua, "Назва_позиції_укр": name_ua,
          "Пошукові_запити": ", ".join(gen_keywords(product, "ru")),
@@ -513,11 +678,30 @@ def build_fields(product, cand=None, use_ai=True):
          "Опис": html_desc(product, "ru"), "Опис_укр": html_desc(product, "ua"),
          "HTML_заголовок": meta_title(product, "ru"), "HTML_заголовок_укр": meta_title(product, "ua"),
          "HTML_опис": meta_desc(product, "ru"), "HTML_опис_укр": meta_desc(product, "ua"),
-         "Ціна": price, "Валюта": "UAH", "Одиниця_виміру": "шт.",
+         "Ціна": price, "Валюта": canon.SCALAR_DEFAULTS["Валюта"],
+         # Тип_товару=r, Знижка, Ярлик, Товар_в_ProSale — не «магія», а те, що
+         # стоїть у 3960/3960 бойових рядків (adding/canon.py). Досі ці колонки
+         # їхали в Prom ПОРОЖНІМИ, тобто щойно додана позиція відрізнялась від
+         # решти магазину знижкою і відсутністю в ProSale.
+         "Тип_товару": canon.SCALAR_DEFAULTS["Тип_товару"],
+         "Знижка": canon.SCALAR_DEFAULTS["Знижка"],
+         "Ярлик": canon.SCALAR_DEFAULTS["Ярлик"],
+         "Товар_в_ProSale": canon.SCALAR_DEFAULTS["Товар_в_ProSale"],
+         "Одиниця_виміру": canon.unit_for(name_ua),
          "Наявність": avail, "Кількість": qty_cell,
+         # ДВІ ОСІ. Група — вітрина магазину; підрозділ — каталог самого Prom,
+         # і без нього позиції нема в маркетплейсному пошуку. Посилання не
+         # пишеться руками: його рахує canon.section_url() з ідентифікатора,
+         # щоб номер і адреса фізично не могли розійтися.
          "Номер_групи": gid, "Назва_групи": gname,
-         "Виробник": product.get("brand") or (cand or {}).get("brand") or "",
-         "Посилання_зображення": ", ".join(imgs)}
+         "Ідентифікатор_підрозділу": sid, "Посилання_підрозділу": surl,
+         "Виробник": brand,
+         "Країна_виробник": canon.country_for(brand),
+         # MPN — той самий каталожний номер, лише в полі, яке читає Google
+         # Merchant. Без нього фід або відхиляється, або товар не склеюється з
+         # такими самими в інших магазинів.
+         "Номер_пристрою_(MPN)": _solid(art),
+         "Посилання_зображення": canon.join_images(imgs)}
     if w:
         f["Вага,кг"] = str(w).replace(",", ".")
     gt = gtin_from(product)
@@ -535,4 +719,41 @@ def build_fields(product, cand=None, use_ai=True):
     # ніхто не ловив, бо детермінований генератор таких не робить, а перевірка
     # стояла до злиття. Тепер один і той самий шлюз проходять обидва джерела тексту.
     enforce_limits(f, art)
-    return f, name_ua, imgs, details, price
+    # Повертаємо КАНОНІЧНИЙ набір, а не сирі details постачальника: рівно те, що
+    # ляже в блоки характеристик експорту і що побачить валідатор та ШІ-аудит.
+    # Досі ці три місця дивились на різні списки, і «Код запчастини» не бачило
+    # жодне з них.
+    return f, name_ua, imgs, chars, price
+
+
+def repair_card(f, product, issues, use_ai=True):
+    """ДРУГИЙ ПРОХІД ШІ: переписати текст так, щоб зауваження аудиту зникли.
+
+    Повертає список полів, які реально змінились (порожній — нічого не робили).
+    Технічних полів не торкається взагалі: merge_ai фізично вміє писати лише в
+    10 текстових ключів, тому група, ціна, наявність, характеристики й фото
+    лишаються такими, якими їх порахував код. Зауваження про них сюди навіть не
+    доходять — ai_layer.repairable() відсіює все, крім тексту.
+
+    Після правки картка ЗНОВУ проходить enforce_limits(): відповідь другого
+    проходу — такий самий сирий текст від провайдера, як і першого, і поблажок
+    їй не робиться."""
+    if not use_ai or not repair_on() or not product:
+        return []
+    art = str(f.get("Код_товару") or "").strip()
+    facts = card_facts(product, clean_details, _fitment)
+    ai = repair_fields(facts, issues, current=f)
+    if not ai:
+        return []
+    before = {k: f.get(k) for k in _REPAIRABLE}
+    merge_ai(f, ai)
+    enforce_limits(f, art)
+    changed = [k for k in _REPAIRABLE if f.get(k) != before[k]]
+    if changed:
+        print(f"[ai] ✍ правка за зауваженнями: {', '.join(changed)}")
+    return changed
+
+
+_REPAIRABLE = ("Назва_позиції", "Назва_позиції_укр", "Пошукові_запити",
+               "Пошукові_запити_укр", "Опис", "Опис_укр", "HTML_заголовок",
+               "HTML_заголовок_укр", "HTML_опис", "HTML_опис_укр")
