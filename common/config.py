@@ -12,8 +12,28 @@ ID_BMPARTS_BOOK = os.environ.get("BMPARTS_SHEET_ID") or "1sGAA3KRHKm4oeNtL56MpAr
 EXPORT_TAB = "Export Products Sheet"   # БОЙОВА: Prom тягне фід звідси
 REPORT_TAB = "Звіт_Ціни"               # журнал репрайсера
 REVIEW_TAB = "Огляд_Додавання"         # кандидати на додавання
+PANEL_TAB = "Пульт_Додавання"          # інтерфейс вибору джерела (власник керує звідси)
 STAGING_TAB = "Staging_Prom"
 BM_TAB = "BMParts"                     # вкладка в окремій книзі BM Parts
+
+# ---- Джерела кандидатів на додавання -------------------------------------
+# BM Parts дає ПОВНУ картку (фото + характеристики + OEM + сумісність).
+# Прайси постачальників дають лише артикул + назву + собівартість -> решту треба
+# або знайти в довіднику BM Parts (adding/sources/lookup.py), або лишити порожнім.
+SRC_BMPARTS = "BM Parts"
+SRC_BMW = "BMW прайс (Баварія)"
+SRC_PORSCHE = "Porsche прайс"
+SRC_ALL = "Усі джерела"
+SOURCES = [SRC_BMPARTS, SRC_BMW, SRC_PORSCHE, SRC_ALL]
+
+# джерело -> (ID книги-прайсу, бренд для картки)
+SUPPLIER_BOOKS = {
+    SRC_BMW: (ID_BMW, "BMW"),
+    SRC_PORSCHE: (ID_PORSCHE, "Porsche"),
+}
+
+TARGETS = ["staging", "export"]
+AI_LEVELS = ["Без ШІ", "Чернетка", "Повний"]
 
 # Формат ЕКСПОРТУ Prom, 0-based індекси колонок Export Products Sheet
 C_CODE = 0    # A Код_товару

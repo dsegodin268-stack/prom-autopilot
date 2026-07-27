@@ -14,14 +14,24 @@ def gclient():
     return gspread.service_account_from_dict(json.loads(key)) if key.strip().startswith("{") else None
 
 
-def open_hub(hub_id):
-    """Відкрити книгу за ID зі scope=spreadsheets (для конвеєра додавання)."""
+def gclient_rw():
+    """Авторизований gspread-Client зі scope=spreadsheets (читання+запис).
+
+    Потрібен окремо від gclient(): конвеєру додавання треба відкривати не лише
+    HUB, а й книги-прайси постачальників, а sh.client у gspread 6 — це HTTPClient
+    без open_by_key. Щоб не плодити копії авторизації, і open_hub(), і
+    adding/sources/supplier_book.py беруть клієнта звідси."""
     import gspread
     from google.oauth2.service_account import Credentials
     creds = Credentials.from_service_account_info(
         json.loads(os.environ["GCP_SA_KEY"]),
         scopes=["https://www.googleapis.com/auth/spreadsheets"])
-    return gspread.authorize(creds).open_by_key(hub_id)
+    return gspread.authorize(creds)
+
+
+def open_hub(hub_id):
+    """Відкрити книгу за ID зі scope=spreadsheets (для конвеєра додавання)."""
+    return gclient_rw().open_by_key(hub_id)
 
 
 def keyf(s):

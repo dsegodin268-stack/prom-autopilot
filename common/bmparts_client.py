@@ -119,8 +119,13 @@ def clean_name(name):
 
 
 def cdn_url(path):
-    p = str(path).replace("\\", "/").lstrip("/")
-    return f"{CDN}/{p}"
+    """Відносний шлях -> повний URL CDN. Готове посилання лишає як є —
+    інакше повторний виклик ліпив «cdn.bm.parts/https:/cdn.bm.parts/…»
+    (а тепер картку може будувати і кандидат, у якого фото вже з URL)."""
+    p = str(path).replace("\\", "/")
+    if p.startswith("http://") or p.startswith("https://"):
+        return p
+    return f"{CDN}/{p.lstrip('/')}"
 
 
 def oem_and_replacements(product):
