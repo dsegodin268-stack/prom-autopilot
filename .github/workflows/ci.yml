@@ -12,6 +12,9 @@ jobs:
         with: {python-version: "3.11"}
       - run: pip install -r requirements.txt pytest
       - name: Компіляція всіх модулів
-        run: python -m compileall -q common repricing adding bmparts_mirror competitors tools
-      - name: Unit-тести (нормалізація, ціни, brandId, якір)
+        run: python -m compileall -q common repricing adding bmparts_mirror competitors tools tests
+      # Сухий прогін конвеєра додавання (tests/test_pipeline_dry.py) ганяє весь
+      # ланцюг пульт -> кандидати -> огляд -> валідатор -> Export/Staging на
+      # підробках із tests/fakes.py. Мережі не торкається жодного разу.
+      - name: Тести (нормалізація, ціни, рівні повноти, валідатор, сухий прогін додавання)
         run: python -m pytest tests/ -q

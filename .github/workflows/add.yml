@@ -1,29 +1,59 @@
+# КЕРУВАННЯ — З ТАБЛИЦІ. Вкладка «Пульт_Додавання» задає джерело, марку, ліміт,
+# куди писати, рівень ШІ та фільтри. Поля нижче лишились як ЗАПАСНІ значення:
+# вони спрацьовують, лише коли відповідна клітинка пульта порожня або коли пульт
+# вимкнено (PANEL=0).
 name: add
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "review = список кандидатів на огляд; enrich = збагатити відмічені «Взяти»"
+        description: "review = список кандидатів на огляд; enrich = збагатити відмічені «Взяти»; panel = лише створити/оновити пульт"
         required: true
         default: "review"
         type: choice
-        options: ["review", "enrich"]
+        options: ["review", "enrich", "panel"]
+      source:
+        description: "Джерело (запасне, якщо клітинка пульта порожня)"
+        required: false
+        default: "BM Parts"
+        type: choice
+        options: ["BM Parts", "BMW прайс (Баварія)", "Porsche прайс", "Усі джерела"]
       brand:
-        description: "Бренд (для review): BMW, PORSCHE, VAG..."
+        description: "Бренд для BM Parts: BMW, PORSCHE, VAG..."
         required: false
         default: "BMW"
       target:
-        description: "Куди писати (для enrich): export | staging"
+        description: "Куди писати готові картки"
         required: false
         default: "export"
+        type: choice
+        options: ["export", "staging"]
       max:
-        description: "Ліміт (0 = всі)"
+        description: "Ліміт позицій за раз (0 = всі)"
         required: false
         default: "0"
-      ai_model:
-        description: "Модель AI (openai/gpt-4.1 для GitHub Models; claude-* потребує ANTHROPIC_API_KEY)"
+      ai_level:
+        description: "Рівень ШІ. «Без ШІ» = повністю детерміновано, жодного зовнішнього запиту"
         required: false
-        default: "openai/gpt-4.1"
+        default: "Повний"          # той самий дефолт, що й у пульті — щоб PANEL=0 не міняв поведінку
+        type: choice
+        options: ["Без ШІ", "Чернетка", "Повний"]
+      live:
+        description: "1 = писати в таблицю по-справжньому; 0 = сухий прогін (тільки лог)"
+        required: false
+        default: "1"
+        type: choice
+        options: ["1", "0"]
+      panel:
+        description: "1 = читати «Пульт_Додавання»; 0 = ігнорувати пульт і взяти поля вище"
+        required: false
+        default: "1"
+        type: choice
+        options: ["1", "0"]
+      ai_model:
+        description: "Примусова модель (порожньо = модель за замовчуванням для провайдера сходів)"
+        required: false
+        default: ""
 jobs:
   add:
     runs-on: ubuntu-latest
@@ -32,15 +62,38 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
       - run: pip install -r requirements.txt
-      - name: Add positions (review / enrich)
+      - name: Add positions (panel / review / enrich)
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           BMPARTS_TOKEN: ${{ secrets.BMPARTS }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+          # сходи ШІ-провайдерів (adding/ai_layer.py). Кожен ключ НЕОБОВ'ЯЗКОВИЙ:
+          # якщо секрета нема, провайдер просто пропускається. Без жодного ключа
+          # картка лишається повністю детермінованою.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          SCALEWAY_API_KEY: ${{ secrets.SCALEWAY_API_KEY }}
+          # Cloudflare — єдиний, кому потрібні ДВА значення: без CF_ACCOUNT_ID
+          # адреса неповна, тому сходинка сама себе вимикає (adding/ai_layer._ready).
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
           GH_MODELS_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AI_PROVIDERS: ${{ vars.AI_PROVIDERS }}
           AI_MODEL: ${{ github.event.inputs.ai_model }}
+
+          # запасні значення пульта
           MODE: ${{ github.event.inputs.mode }}
+          SOURCE: ${{ github.event.inputs.source }}
           BRAND: ${{ github.event.inputs.brand }}
           TARGET: ${{ github.event.inputs.target }}
           MAX: ${{ github.event.inputs.max }}
+          AI_LEVEL: ${{ github.event.inputs.ai_level }}
+          LIVE: ${{ github.event.inputs.live }}
+          PANEL: ${{ github.event.inputs.panel }}
         run: python -m adding.run
