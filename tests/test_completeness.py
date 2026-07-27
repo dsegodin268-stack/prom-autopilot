@@ -35,14 +35,29 @@ def test_no_photo_is_level_3():
 
 def test_group_that_does_not_map_is_counted_as_missing():
     """Головне правило власника: позиція мусить одразу знаходитись у каталозі.
-    Масляного фільтра нема в сіді GROUPS -> номер групи Prom невідомий ->
+    Водяної помпи нема в сіді GROUPS -> номер групи Prom невідомий ->
     у бойову таблицю така картка не їде, чекає ручного вибору групи.
-    Вигадати ID не можна: неіснуючий номер ламає імпорт усього файлу."""
+    Вигадати ID не можна: неіснуючий номер ламає імпорт усього файлу.
+
+    Вартовим тут раніше був масляний фільтр — доки 27.07 не звірили номери
+    груп фільтрів із вітриною власника й фільтри не почали мапитись."""
     c = _full()
-    c.update(article="11427953129", name_src="Фільтр масляний", group_hint="Фільтри")
+    c.update(article="11517586925", name_src="Помпа водяна",
+             group_hint="Система охолодження")
     assert "група" in missing(c)
     assert level(c) == 2
     assert route(c, "export")[0] == "staging"
+
+
+def test_oil_filter_now_maps_and_goes_to_export():
+    """Дзеркало до тесту вище: масляний фільтр — найходовіша позиція ТО, і з
+    27.07 у нього є справжня група Prom 138500033, тому він їде в Export, а не
+    зависає в Staging зі статусом «нема групи»."""
+    c = _full()
+    c.update(article="11427953129", name_src="Фільтр масляний", group_hint="Фільтри")
+    assert missing(c) == []
+    assert level(c) == 1
+    assert route(c, "export")[0] == "export"
 
 
 def test_supplier_category_text_alone_is_not_a_group():

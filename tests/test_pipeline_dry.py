@@ -84,7 +84,7 @@ def test_review_builds_three_candidates_with_right_levels(sh):
     art = head.index("Артикул")
     by_art = {r[art]: r[lv] for r in rows[1:]}
     assert by_art["34116792217"].startswith("1")     # повна картка, група мапиться
-    assert by_art["11427953129"].startswith("2")     # усе є, але групи Prom нема
+    assert by_art["11517586925"].startswith("2")     # усе є, але групи Prom нема
     assert by_art["34116794300"].startswith("3")     # нема фото
     assert by_art["63117214941"].startswith("2")     # фото є, характеристик мало
 
@@ -118,7 +118,7 @@ def test_enrich_routes_by_level(sh):
     ex = sh.ws(EXPORT_TAB).get_all_values()
     stg = sh.ws(STAGING_TAB).get_all_values()
     assert [r[0] for r in ex[1:]] == ["34116792217"]          # лише рівень 1
-    assert {r[0] for r in stg[1:]} == {"11427953129", "34116794300", "63117214941"}
+    assert {r[0] for r in stg[1:]} == {"11517586925", "34116794300", "63117214941"}
 
 
 def test_no_photo_never_reaches_export(sh):
@@ -201,7 +201,7 @@ def test_second_run_does_not_duplicate_existing_codes(sh):
 
 def test_review_skips_codes_already_in_export(sh):
     ex = sh.ws(EXPORT_TAB)
-    ex.append_rows([["11427953129"] + [""] * (len(EX_HEAD) - 1)])
+    ex.append_rows([["11517586925"] + [""] * (len(EX_HEAD) - 1)])
     _st, cands = _run_review(sh)
     assert {c["article"] for c in cands} == {"34116792217", "34116794300", "63117214941"}
 

@@ -241,7 +241,7 @@ def test_pipeline_publishes_even_when_ai_says_fix(monkeypatch):
     ex = book.ws(EXPORT_TAB).get_all_values()
     stg = book.ws(STAGING_TAB).get_all_values()
     assert [r[0] for r in ex[1:]] == ["34116792217"]
-    assert {r[0] for r in stg[1:]} == {"11427953129", "34116794300", "63117214941"}
+    assert {r[0] for r in stg[1:]} == {"11517586925", "34116794300", "63117214941"}
 
     # …а зауваження ШІ при цьому таки видно власнику в огляді
     rows = rv.get_all_values()
