@@ -35,7 +35,7 @@ on:
       ai_level:
         description: "Рівень ШІ. «Без ШІ» = повністю детерміновано, жодного зовнішнього запиту"
         required: false
-        default: "Повний"          # той самий дефолт, що й у пульті — щоб PANEL=0 не міняв поведінку
+        default: "Повний"   # той самий дефолт, що й у пульті — щоб PANEL=0 не міняв поведінку
         type: choice
         options: ["Без ШІ", "Чернетка", "Повний"]
       live:
@@ -80,11 +80,23 @@ jobs:
           # адреса неповна, тому сходинка сама себе вимикає (adding/ai_layer._ready).
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          # Kilo Gateway — один ключ на кілька чужих моделей. Ліміт рахується ПО IP
+          # раннера, а раннер у GitHub спільний, тому сходинка ЗАПАСНА.
+          KILO_API_KEY: ${{ secrets.KILO_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+          # Vercel AI Gateway — ЄДИНИЙ платний рунг у сходах ($5 кредитів/міс).
+          # Поки секрета нема, він просто не існує для сходів і нічого не витрачає.
+          AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
           GH_MODELS_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Три ЧЕРГИ, а не одна. AI_PROVIDERS — створення картки (тут потрібна
+          # найкраща українська). AI_PROVIDERS_AUDIT — перевірка (її тягне і
+          # маленька модель, і саме вона з'їдала квоту найкращої). AI_PROVIDERS_FIX —
+          # другий прохід. Порожня змінна = беремо AI_PROVIDERS, тобто як було.
           AI_PROVIDERS: ${{ vars.AI_PROVIDERS }}
+          AI_PROVIDERS_AUDIT: ${{ vars.AI_PROVIDERS_AUDIT }}
+          AI_PROVIDERS_FIX: ${{ vars.AI_PROVIDERS_FIX }}
           AI_MODEL: ${{ github.event.inputs.ai_model }}
 
           # запасні значення пульта
