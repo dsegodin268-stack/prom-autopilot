@@ -366,6 +366,29 @@ def validate_lang(card):
     return flags
 
 
+def validate_solid(card):
+    """Каталожні номери в тексті — суцільно (ПРАВИЛА, правило `num_spaced`).
+
+    28.07. У бойовий рядок 3964 пішов OEM у вигляді «31 30 6 791 712»: саме так
+    його віддає довідник BM Parts. Наслідок — у описі й ключовиках стояв номер,
+    якого ніхто не набирає, а робочий 31306791712 у мета-опис не потрапив
+    узагалі, і його дописували ворота. Ворота тепер чистять; ця перевірка
+    існує, щоб брак було ВИДНО у звіті й у промпті аудиту, а не лише мовчки
+    виправлено. Префікс «{label}: » — щоб ai_layer.repairable() пропустив
+    зауваження в другий прохід ШІ.
+
+    Рівень WARN: розбитий номер не ламає імпорт, його треба переписати."""
+    flags = []
+    for key, _want, label in _LANG_FIELDS:
+        if key not in card:
+            continue
+        problem = rules.spaced_number(card.get(key))
+        if problem:
+            flags.append((key.split("_")[0], WARN, "num_spaced",
+                          f"{label}: {problem}"))
+    return flags
+
+
 def validate_card(card, is_part=True, level=1):
     """card: dict(name, description, chars, images, price, group_id, product_id).
     Повертає список (field, level, code, message).
@@ -428,6 +451,7 @@ def validate_card(card, is_part=True, level=1):
     # просто наскрізна. Виконується для будь-якої картки, бо змішана мова —
     # це брак і в запчастині, і в аксесуарі.
     flags.extend(validate_lang(card))
+    flags.extend(validate_solid(card))
     # КАНОН — останнім, щоб у summarize() ці коди стояли поруч і в звіті було
     # видно одним оком, картка розійшлася з довідником чи ні.
     flags.extend(validate_canon(card, is_part=is_part))

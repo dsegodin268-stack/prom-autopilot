@@ -346,6 +346,43 @@ def _solid(s):
     return re.sub(r"[\s\-–—]+", "", str(s or "")).strip()
 
 
+# Ряд цифр, розбитий пробілами, у ВІЛЬНОМУ тексті: «31 30 6 791 712».
+# Три групи й не менше 7 цифр — щоб під правило не потрапили роки («2011 2019»
+# — дві групи) і взагалі будь-яка пара чисел поруч.
+_NUM_RUN = re.compile(r"(?<![\w.,])\d+(?: \d+){2,}(?![\w])(?![.,]\d)")
+
+
+def _solid_nums(s):
+    """Те саме, що _solid(), але всередині довільного тексту: збиває докупи
+    лише ряди цифр, розділені пробілами, і не чіпає ні бренд, ні решту рядка.
+
+    «Оригінальний (OEM) номер: 31 30 6 791 712.» -> «…: 31306791712.»"""
+    def _join(m):
+        t = m.group(0)
+        return t.replace(" ", "") if len(re.sub(r"\D", "", t)) >= 7 else t
+    return _NUM_RUN.sub(_join, str(s or ""))
+
+
+def _oem_repl(product):
+    """oem_and_replacements(), але номери вже в канонічному вигляді.
+
+    BM Parts віддає OEM BMW у «людському» записі — «31 30 6 791 712». У картку
+    він мусить іти суцільно: з пробілами крос-довідник Prom номер не впізнає, а
+    Google не склеює його з тим, що набирає покупець. Поки чистка стояла лише в
+    _cross() і в MPN, той самий номер їхав у трьох полях РІЗНИМ: в описі — з
+    пробілами, у ключовиках — обидва варіанти (другий просто займав слот), а в
+    мета-опис робочий номер не потрапляв узагалі, і його дописували ворота
+    enforce_limits(). Тому чистимо ОДИН раз тут, а не в п'яти місцях по-різному."""
+    oem, repl = oem_and_replacements(product)
+    out, seen = [], set()
+    for o in oem or ():
+        s = _solid(o)
+        if s and s.upper() not in seen:
+            seen.add(s.upper())
+            out.append(s)
+    return out, [_solid_nums(r) for r in (repl or ())]
+
+
 def _fit_brand(product, cand, fits):
     """Марка АВТО для «Сумісність з маркою».
 
@@ -451,7 +488,7 @@ def canon_chars(product, cand=None, details=None):
     name = _display_name(product.get("name"))
     fits = _fitment(product, name)
     brand_fit = _fit_brand(product, cand, fits)
-    oem, repl = oem_and_replacements(product)
+    oem, repl = _oem_repl(product)
     ch = [
         (canon.CH_STATE, "", canon.VAL_STATE_NEW),
         (canon.CH_BRAND_FIT, "", brand_fit),
@@ -470,7 +507,7 @@ def canon_chars(product, cand=None, details=None):
 # ---------- Опис (ПРАВИЛА §3a) ----------
 def html_desc(product, lang):
     name = _display_name(product.get("name")).rstrip(".")
-    oem, repl = oem_and_replacements(product)
+    oem, repl = _oem_repl(product)
     details = clean_details(product)
     if lang == "ru":
         nm = ua2ru(name)
@@ -584,7 +621,7 @@ def gen_keywords(product, lang):
     name = product.get("name") or ""
     brand = product.get("brand") or ""
     art = product.get("article") or ""
-    oem, repl = oem_and_replacements(product)
+    oem, repl = _oem_repl(product)
     typ = _type_phrase(name)
     typ_l = ua2ru(typ) if lang == "ru" else typ
     cars = _car_tokens(name)
@@ -681,7 +718,7 @@ def meta_desc(product, lang):
     відсутності OEM береться артикул. Місто з хвоста прибрано (§0-bis)."""
     name = _display_name(product.get("name"))
     art = str(product.get("article") or "").strip()
-    oem, _ = oem_and_replacements(product)
+    oem, _ = _oem_repl(product)
     base = re.sub(r"\s+", " ", (ua2ru(name) if lang == "ru" else name)).strip()
     num = (oem[0] if oem else art)
     o = (f" OEM {num}." if num else "")
@@ -692,16 +729,33 @@ def meta_desc(product, lang):
     return (s + tail) if len(s) + len(tail) <= META_DESC_MAX else s
 
 
+# Поля, у яких каталожний номер мусить бути суцільним. Технічні колонки
+# (Кросс-номери, MPN, Код_запчастини) сюди не входять: вони й так проходять
+# через _solid(), а числа в них — не «текст», а значення.
+_SOLID_FIELDS = ("Назва_позиції", "Назва_позиції_укр",
+                 "Пошукові_запити", "Пошукові_запити_укр",
+                 "Опис", "Опис_укр",
+                 "HTML_заголовок", "HTML_заголовок_укр",
+                 "HTML_опис", "HTML_опис_укр")
+
+
 def enforce_limits(f, art=""):
     """Єдиний шлюз жорстких меж Prom/Google. Працює і для детермініка, і для ШІ.
 
     Що робить:
       • мета-заголовок ≤70, мета-опис ≤160 (§4, §10);
       • каталожний номер присутній в обох мета-полях (§0);
+      • каталожні номери СУЦІЛЬНО, без пробілів, у всіх текстових полях (§0);
       • ключовики: без заборонених слів і сміття, не більше 40 (§2, §10).
     Нічого не «покращує» — лише не пускає за межі. Оцінку якості робить
     валідатор (adding/validator.py), а не цей шлюз."""
     art = str(art or "").strip()
+    # Номер суцільно — тут, а не лише в джерелі даних: через ці самі ворота
+    # проходить і текст, переписаний ШІ, а він теж любить «людський» запис
+    # «31 30 6 791 712». Ворота мусять тримати правило незалежно від автора.
+    for k in _SOLID_FIELDS:
+        if f.get(k):
+            f[k] = _solid_nums(str(f[k]))
     for k, limit in (("HTML_заголовок", META_TITLE_MAX), ("HTML_заголовок_укр", META_TITLE_MAX),
                      ("HTML_опис", META_DESC_MAX), ("HTML_опис_укр", META_DESC_MAX)):
         v = str(f.get(k) or "")
