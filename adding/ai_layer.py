@@ -320,6 +320,31 @@ def _ladder(kind="main"):
     return out
 
 
+# Яку чергу читає _ai_call прямо зараз. Свідомо НЕ параметр функції: підпис
+# _ai_call(system, user_json) лишається таким, яким був, бо на нього спирається
+# купа тестів (вони підміняють функцію двоаргументною заглушкою). Конвеєр
+# однопотоковий, тому модульна змінна тут безпечна.
+_queue_kind = "main"
+
+
+class _use_queue:
+    """Тимчасово перемикає чергу для _ai_call."""
+
+    def __init__(self, kind):
+        self.kind = kind
+
+    def __enter__(self):
+        global _queue_kind
+        self.prev = _queue_kind
+        _queue_kind = self.kind
+        return self
+
+    def __exit__(self, *a):
+        global _queue_kind
+        _queue_kind = self.prev
+        return False
+
+
 def _models_for(prov):
     """Список моделей-кандидатів для провайдера, у порядку спроби.
 
@@ -433,12 +458,13 @@ def _retry_after(e, default):
     return default
 
 
-def _ai_call(system, user_json, kind="main"):
+def _ai_call(system, user_json):
     """Йде сходами: 429/ліміт -> провайдер у cooldown, беремо наступного.
 
-    kind вибирає ЧЕРГУ (main / audit / fix), а не поведінку: логіка обходу,
+    Яку саме чергу брати (main / audit / fix), задає _queue_kind через
+    контекст _use_queue. Це вибір ЧЕРГИ, а не поведінки: логіка обходу,
     cooldown і лічильники спільні на всі три, бо квота в провайдера теж одна."""
-    ladder = _ladder(kind)
+    ladder = _ladder(_queue_kind)
     if not ladder:
         return None
     for prov in ladder:
@@ -832,7 +858,8 @@ def audit_card(f, chars=None, images=None, article="", group="", known=(), use_a
     if payload in _audit_memo:
         return _audit_memo[payload]
     try:
-        txt = _ai_call(AUDIT_SYSTEM, payload, kind="audit")
+        with _use_queue("audit"):
+            txt = _ai_call(AUDIT_SYSTEM, payload)
         if not txt:
             return _canon_only(known)
         mt = re.search(r"\{.*\}", txt, re.S)
@@ -934,8 +961,10 @@ def repair_fields(facts, issues, current=None, thin=False):
     if payload in _fix_memo:
         return _fix_memo[payload]
     try:
-        txt = _ai_call(REPAIR_SYSTEM if not thin else PROM_AI_SYSTEM_THIN + _REPAIR_TAIL,
-                       payload, kind="fix")
+        with _use_queue("fix"):
+            txt = _ai_call(
+                REPAIR_SYSTEM if not thin else PROM_AI_SYSTEM_THIN + _REPAIR_TAIL,
+                payload)
         if not txt:
             return None
         mt = re.search(r"\{.*\}", txt, re.S)
