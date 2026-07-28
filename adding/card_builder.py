@@ -372,7 +372,13 @@ def _oem_repl(product):
     _cross() і в MPN, той самий номер їхав у трьох полях РІЗНИМ: в описі — з
     пробілами, у ключовиках — обидва варіанти (другий просто займав слот), а в
     мета-опис робочий номер не потрапляв узагалі, і його дописували ворота
-    enforce_limits(). Тому чистимо ОДИН раз тут, а не в п'яти місцях по-різному."""
+    enforce_limits(). Тому чистимо ОДИН раз тут, а не в п'яти місцях по-різному.
+
+    28.07 додано розбір СПИСКУ в одному полі. BM Parts подекуди кладе в article
+    аналога кілька номерів через кому — «1127404SX,159000115». Далі цей рядок
+    їхав як ОДИН крос-номер, і в бойовій картці 31306791712 всередині списку з
+    роздільником «;» стояла чужа кома. Prom розбирає кроси суворо по «;», тому
+    обидва номери в тій парі не працювали: перший склеєний з другим."""
     oem, repl = oem_and_replacements(product)
     out, seen = [], set()
     for o in oem or ():
@@ -380,7 +386,13 @@ def _oem_repl(product):
         if s and s.upper() not in seen:
             seen.add(s.upper())
             out.append(s)
-    return out, [_solid_nums(r) for r in (repl or ())]
+    rep = []
+    for r in (repl or ()):
+        for part in re.split(r"\s*[,;]\s*", _solid_nums(r)):
+            part = part.strip()
+            if part:
+                rep.append(part)
+    return out, rep
 
 
 def _fit_brand(product, cand, fits):
@@ -399,25 +411,58 @@ def _fit_brand(product, cand, fits):
     return str(product.get("brand") or (cand or {}).get("brand") or "").strip()
 
 
-def _model_of(line, brand):
-    """«BMW 3 G20 B48 2018+» -> «3 G20». Модель плюс код кузова, якщо він поряд.
+# Код кузова у двох написаннях. Голий — так його подає довідник BM Parts
+# («BMW 3 G20 B48»). У дужках — так його пише сам постачальник у назві позиції
+# («BMW 3 (F30)/4 (F33)/M4 (F83)»), і саме за ним покупець фільтрує на Prom.
+_BODY_BARE = re.compile(r"^[A-Za-z]\d{2,3}$")
+_BODY_PAREN = re.compile(r"^\([A-Za-z]{1,2}\d{2,3}\)$")
 
-    Далі не беремо свідомо: наступний токен — це вже код двигуна (B48), і в
-    полі «Сумісність з моделлю» він робить значення, за яким ніхто не фільтрує."""
+
+def _models_of(line, brand):
+    """Рядок сумісності -> СПИСОК моделей.
+
+    Два джерела пишуть по-різному, і обидва мусять доїхати цілими:
+        «BMW 3 G20 B48 2018+»           -> ['3 G20']
+        «BMW 3 (F30)/4 (F33)/M4 (F83)»  -> ['3 (F30)', '4 (F33)', 'M4 (F83)']
+
+    Код двигуна (B48) не беремо свідомо: у полі «Сумісність з моделлю» він дає
+    значення, за яким ніхто не фільтрує.
+
+    28.07. Раніше функція повертала РІВНО одну модель і чіпляла кузов, лише якщо
+    той схожий на «G20». Кузов у дужках під правило не підпадав, а скісна риска
+    не різалась узагалі — тому в бойову картку 31306791712 поїхало «Сумісність з
+    моделлю = 3». Це не модель, це серія: покупець із F30 картку не знаходить, а
+    покупець з будь-якої «трійки» бачить деталь, яка йому не підходить."""
     w = [x for x in re.sub(r"\s+", " ", str(line or "")).strip().split() if x]
     if w and brand and w[0].lower() == str(brand).lower():
         w = w[1:]
     w = [x for x in w if not _YEAR_RE.search(x) and x != "+"]
     if not w:
-        return ""
-    model = w[0]
-    if len(w) > 1 and re.match(r"^[A-Za-z]\d{2,3}$", w[1]):
-        model = f"{model} {w[1]}"
-    return model.strip(" ,.-")
+        return []
+
+    out, series = [], ""
+    for chunk in " ".join(w).split("/"):
+        t = [x for x in chunk.split() if x]
+        if not t:
+            continue
+        head = t[0]
+        if _BODY_PAREN.match(head):
+            # «3 (F30)/(F31)» — серія написана один раз, тягнемо її далі.
+            out.append(f"{series} {head}".strip())
+            continue
+        series = head
+        model = head
+        if len(t) > 1 and (_BODY_BARE.match(t[1]) or _BODY_PAREN.match(t[1])):
+            model = f"{head} {t[1]}"
+        out.append(model.strip(" ,.-"))
+    return [m for m in out if m]
 
 
 def _models(fits, brand):
-    return [m for m in (_model_of(l, brand) for l in fits) if m]
+    out = []
+    for line in fits:
+        out += _models_of(line, brand)
+    return out
 
 
 def _years(fits):
