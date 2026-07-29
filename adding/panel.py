@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
-"""«Пульт_Додавання» — інтерфейс керування конвеєром прямо в таблиці.
+"""«Пульт_Додавання» — НЕОБОВ'ЯЗКОВА вкладка керування конвеєром.
 
-Власник не має ходити в GitHub Actions, щоб вибрати джерело. Він відкриває
-вкладку, обирає зі списку «Джерело» (BM Parts / прайс BMW / прайс Porsche /
-усі), ставить скільки позицій за раз і куди писати — і запускає. Воркфлоу
-add.yml лишається як був: його поля стають ЗАПАСНИМИ значеннями на випадок,
-коли клітинка пульта порожня або вкладки ще нема.
+Власник (29.07.2026) вирішив: окрема вкладка-пульт не потрібна, керування —
+полями воркфлоу add.yml на GitHub. Тому вкладка БІЛЬШЕ НЕ СТВОРЮЄТЬСЯ
+автоматично: нема вкладки — беруться значення з воркфлоу, і все працює.
+Повернути пульт свідомо: запуск add.yml з mode=panel (ensure_panel).
+Якщо вкладка Є — її значення, як і раніше, мають пріоритет.
 
-Пріоритет: значення з пульта > змінна оточення > дефолт.
-Вимкнути пульт цілком (для тестів і CI): env PANEL=0."""
+Підсумок прогону («Останній запуск») тепер пишеться в Огляд_Додавання!Q1,
+звідки його показує меню «⚙️ Prom» у таблиці (Код.gs).
+
+Пріоритет: значення з пульта (якщо вкладка є) > змінна оточення > дефолт.
+Вимкнути читання пульта цілком (для тестів і CI): env PANEL=0."""
 import os
 
 from common.config import AI_LEVELS, PANEL_TAB, SOURCES, SRC_BMPARTS, TARGETS
@@ -110,14 +113,17 @@ def read_panel(sh):
     if not enabled():
         print("[пульт] вимкнено (PANEL=0) — беру значення з воркфлоу")
         return s
+    # Вкладку НЕ створюємо (власник, 29.07: пульт-вкладка йому не потрібна).
+    # Нема вкладки — тихо беремо значення з воркфлоу. Повернути пульт свідомо:
+    # запуск add.yml з mode=panel.
     try:
-        ws = find_ws(sh, PANEL_TAB, create_cols=3)
+        ws = find_ws(sh, PANEL_TAB)
         vals = ws.get_all_values()
         if len(vals) < 2:
-            ensure_panel(sh)
-            vals = find_ws(sh, PANEL_TAB).get_all_values()
-    except Exception as e:
-        print(f"[пульт] недоступний ({str(e)[:70]}) — беру значення з воркфлоу")
+            print(f"[пульт] «{PANEL_TAB}» порожня — беру значення з воркфлоу")
+            return s
+    except BaseException as e:  # find_ws кидає SystemExit, коли вкладки нема
+        print(f"[пульт] вкладки нема ({str(e)[:70]}) — беру значення з воркфлоу")
         return s
     kv = {}
     for i, r in enumerate(vals[1:]):
@@ -148,11 +154,20 @@ def read_panel(sh):
 
 
 def write_status(sh, text):
-    """Пише рядок «Останній запуск» — власник бачить результат там же, де кнопки."""
+    """Пише «Останній запуск» у клітинку Q1 вкладки «Огляд_Додавання» —
+    меню «⚙️ Prom» у таблиці показує його першим пунктом (Код.gs, lastRun_).
+    Окремої вкладки-пульта для цього більше не треба."""
+    from common.config import REVIEW_TAB
     try:
-        ws = find_ws(sh, PANEL_TAB)
-        ws.update(values=[[text]],
-                  range_name=f"B{_ORDER.index('status') + 2}",
+        from datetime import datetime, timedelta, timezone
+        try:
+            from zoneinfo import ZoneInfo
+            now = datetime.now(ZoneInfo("Europe/Kyiv"))
+        except Exception:
+            now = datetime.now(timezone(timedelta(hours=3)))
+        stamp = now.strftime("%d.%m %H:%M")
+        ws = find_ws(sh, REVIEW_TAB, create_cols=17)
+        ws.update(values=[[f"{stamp} — {text}"]], range_name="Q1",
                   value_input_option="RAW")
-    except Exception as e:
+    except BaseException as e:
         print(f"[пульт] статус не записано: {str(e)[:70]}")

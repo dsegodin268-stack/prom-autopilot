@@ -342,7 +342,8 @@ def main():
     if MODE == "panel":
         ensure_panel(sh)
         return
-    ensure_panel(sh)                 # пульт має існувати до будь-якого прогону
+    # Пульт НЕ створюємо (власник видалив вкладку — вона й не повертається).
+    # Нема вкладки -> read_panel бере значення з воркфлоу. Повернути: mode=panel.
     st = read_panel(sh)
     if MODE == "enrich":
         do_enrich(sh, st)
