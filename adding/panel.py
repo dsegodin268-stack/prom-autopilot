@@ -167,6 +167,13 @@ def write_status(sh, text):
             now = datetime.now(timezone(timedelta(hours=3)))
         stamp = now.strftime("%d.%m %H:%M")
         ws = find_ws(sh, REVIEW_TAB, create_cols=17)
+        try:
+            # у «Огляд_Додавання» сітка з 15 колонок (A..O) — Q1 за межами;
+            # розширюємо, інакше APIError 400 «exceeds grid limits» (add #27)
+            if int(getattr(ws, "col_count", 0) or 0) < 17:
+                ws.resize(cols=17)
+        except Exception:
+            pass
         ws.update(values=[[f"{stamp} — {text}"]], range_name="Q1",
                   value_input_option="RAW")
     except BaseException as e:
