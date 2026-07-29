@@ -55,7 +55,12 @@ def read_all_tabs(gc, sid, brand, best, instock, force=None):
                 qty = 0
             if cost <= 0:
                 continue
-            keep_best(best, art, {"name": r[1], "cost": cost, "qty": qty, "days": days,
-                                  "presence": presence, "brand": brand}, instock)
+            it = {"name": r[1], "cost": cost, "qty": qty, "days": days,
+                  "presence": presence, "brand": brand}
+            if brand == "BMW":
+                # ПРІОРИТЕТ ПРАЙСУ BMW (див. sources/base.py):
+                # 0=«наяв», 1=«чекати 2-3д», 2=«під замовлення 15 днів»
+                it["lock"] = 0 if presence == "available" else (1 if days <= 3 else 2)
+            keep_best(best, art, it, instock)
             n += 1
         print(f"[sheet] {brand}/{title}: {n} поз. ({presence})")

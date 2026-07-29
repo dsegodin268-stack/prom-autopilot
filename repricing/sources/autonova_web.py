@@ -345,11 +345,16 @@ def recheck_autonova_faster(codes, best, instock, cookie, on_upgrade=None):
     for code in codes:
         if limit and n_check >= limit:
             break
-        n_check += 1
         k = str(code).strip().upper()
         cur = best.get(k)
         if not cur:
             continue
+        lock = cur.get("lock")
+        if lock is not None and lock <= 1:
+            # ПРІОРИТЕТ ПРАЙСУ BMW: «наяв»/«чекати 2-3д» — ціна BMW перша,
+            # autonova навіть не питаємо (див. sources/base.py)
+            continue
+        n_check += 1
         cur_days = int(num(cur.get("days"))) if cur.get("days") is not None else 15
         try:
             item = _resolve_autonova(code, cookie, all_brands)
@@ -359,7 +364,9 @@ def recheck_autonova_faster(codes, best, instock, cookie, on_upgrade=None):
         if not item:
             continue
         new_days = int(item.get("days") or 0)
-        if new_days < cur_days:  # autonova швидша -> ціну/наявність/термін беремо з autonova
+        # autonova швидша -> беремо autonova; але BMW-«під замовлення» (lock=2)
+        # віддаємо лише ШВИДКОМУ autonova (термін ≤5 днів), інакше ціна BMW лишається
+        if new_days < cur_days and (lock is None or new_days <= 5):
             item["article"] = k
             best[k] = item
             if item["presence"] == "available" and item["qty"] > 0:

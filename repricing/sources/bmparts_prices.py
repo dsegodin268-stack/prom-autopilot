@@ -53,6 +53,11 @@ def _bmparts_list_map():
     if ci < 0 or cp < 0:
         print(f"[bmparts] /prices/list: колонки не розпізнані {head[:8]}")
         return {}
+    # Окремої колонки «наявність/кількість» у /prices/list НЕМА (проба #9, 29.07):
+    # шапка = ІД,Артикул,Бренд,Назва,Ціна ГРН, далі ПО КОЛОНЦІ НА СКЛАД
+    # («Київ Бровари ДАГ», …), значення «-» = нема, число = залишок.
+    # Саме тому нічний прогін бачив «у наявності: 0». Рахуємо суму по складах.
+    wh_cols = list(range(cp + 1, len(head)))
     out = {}
     for r in rows[1:]:
         if ci >= len(r) or cp >= len(r):
@@ -62,6 +67,8 @@ def _bmparts_list_map():
         if not art or price <= 0:
             continue
         qty = num(r[cq]) if 0 <= cq < len(r) else 0
+        if qty <= 0 and wh_cols:
+            qty = sum(num(r[j]) for j in wh_cols if j < len(r))
         av = (r[cav].strip().lower() if 0 <= cav < len(r) else "")
         available = ("наявн" in av or av in ("+", "true", "1", "в наявності", "у наявності")) or qty > 0
         if art not in out or price < out[art]["price"]:
