@@ -427,14 +427,17 @@ def test_review_skips_codes_already_in_export(sh):
     assert {c["article"] for c in cands} == {"34116792217", "34116794300", "63117214941"}
 
 
-def test_panel_status_is_written_back(sh):
+def test_run_status_is_written_to_review_q1(sh):
+    """«Останній запуск» тепер живе в Огляд_Додавання!Q1 — його показує
+    меню «⚙️ Prom» (власник, 29.07: окрема вкладка-пульт не потрібна)."""
     from adding.panel import read_panel
     from adding.run import do_enrich
 
     _run_review(sh)
     _take_all(sh)
     do_enrich(sh, read_panel(sh))
-    status = sh.ws(PANEL_TAB).get_all_values()[8][1]
+    row1 = sh.ws(REVIEW_TAB).get_all_values()[0]
+    status = row1[16] if len(row1) > 16 else ""
     assert "Export 1" in status and "Staging 3" in status
 
 
