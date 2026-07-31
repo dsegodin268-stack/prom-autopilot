@@ -7,21 +7,25 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "review = список кандидатів на огляд; enrich = збагатити відмічені «Взяти»; ai_check = перевірити ключі ШІ; panel = лише створити/оновити пульт"
+        description: "review = список кандидатів; enrich = зібрати картки за «Взяти»; ai_scan = перевірити відмічені позиції БЕЗ запису; ai_check = перевірити ключі ШІ; panel = створити/оновити пульт"
         required: true
         default: "review"
         type: choice
-        options: ["review", "enrich", "ai_check", "panel"]
+        options: ["review", "enrich", "ai_scan", "ai_check", "panel"]
       source:
-        description: "Джерело (запасне, якщо клітинка пульта порожня)"
+        description: "Джерела (запасне, якщо клітинка пульта порожня). Можна кілька через кому"
         required: false
         default: "BM Parts"
-        type: choice
-        options: ["BM Parts", "BMW прайс (Баварія)", "Porsche прайс", "Усі джерела"]
       brand:
-        description: "Бренд для BM Parts: BMW, PORSCHE, VAG..."
+        description: "Марки для BM Parts, можна кілька через кому: BMW, MINI"
         required: false
         default: "BMW"
+      scratch:
+        description: "Картка з нуля для позицій, яких нема в BM Parts"
+        required: false
+        default: "Вимкнено"
+        type: choice
+        options: ["Вимкнено", "Так, у чернетку", "Так, одразу в Export"]
       target:
         description: "Куди писати готові картки"
         required: false
@@ -91,6 +95,7 @@ jobs:
           MODE: ${{ github.event.inputs.mode }}
           SOURCE: ${{ github.event.inputs.source }}
           BRAND: ${{ github.event.inputs.brand }}
+          SCRATCH: ${{ github.event.inputs.scratch }}
           TARGET: ${{ github.event.inputs.target }}
           MAX: ${{ github.event.inputs.max }}
           AI_LEVEL: ${{ github.event.inputs.ai_level }}
