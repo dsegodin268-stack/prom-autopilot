@@ -29,6 +29,9 @@ def candidate(source, article, name_src, cost, qty=0, presence="order",
     photos/chars/oem/fitment/group_hint — контент; у прайсів порожні,
                  заповнюються довідником BM Parts (sources/lookup.py)
     matched_bm — позиція є в BM Parts (контент для неї здобувний)
+    scratch    — картку доведеться збирати З НУЛЯ: позиції нема в каталозі
+                 BM Parts, тобто нема ні фото, ні характеристик, ні OEM.
+                 Вмикається пультом («Картка з нуля»), читається card_builder.
     card_loaded — картку BM Parts уже завантажено, тобто OEM і сумісність
                  відомі остаточно. Поки False — ці два поля просто ще НЕ
                  запитували (bulk-фід їх не віддає), і рахувати їх «браком»
@@ -39,7 +42,7 @@ def candidate(source, article, name_src, cost, qty=0, presence="order",
             "cost": cost, "qty": qty, "presence": presence, "days": days,
             "brand": brand, "photos": photos or [], "chars": chars or [],
             "oem": oem or [], "fitment": fitment or [], "group_hint": group_hint,
-            "matched_bm": False, "card_loaded": False}
+            "matched_bm": False, "card_loaded": False, "scratch": False}
 
 
 def key(article):
