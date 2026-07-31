@@ -9,13 +9,22 @@ AUTONOVA_PROXY (опц.) — обхід блокування IP GitHub-ранн�
 ПРАВИЛО «ТІЛЬКИ ОРИГІНАЛ» (власник, 24.07): ціна/наявність береться ВИКЛЮЧНО з
 пропозицій на оригінальний (запитаний) номер. Аналоги та крос-номери відкидаються;
 якщо оригіналу нема в наявності — лишаємо «під замовлення» з ціною/терміном
-оригіналу, аналог НЕ підставляємо. Діагностика структури — env AUTONOVA_DEBUG=N."""
+оригіналу, аналог НЕ підставляємо. Діагностика структури — env AUTONOVA_DEBUG=N.
+
+ПРИСКОРЕННЯ (31.07): запити йдуть у кілька потоків (AUTONOVA_WORKERS, типово 6)
+під спільним обмежувачем темпу (AUTONOVA_MIN_INTERVAL, типово 0.12 c) і з пам'яттю,
+під якою маркою код знайшовся (ДЕ шукати). Що НЕ змінилось: перелік марок, перелік
+позицій, правило «тільки оригінал», пріоритет прайсу BMW. Ціна/наявність/термін
+НІКОЛИ не кешуються — щоразу свіжі. Рішення і запис у таблицю лишаються
+послідовними, у тому ж порядку, що й раніше."""
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 from common.normalize import num, _nkey, _expand_code
 from repricing.sources.base import keep_best
@@ -23,6 +32,47 @@ from repricing.sources.base import keep_best
 AUTONOVA_API = "https://catalogue-api.autonovad.ua/api/products"
 AUTONOVA_REF = ("A1678992200", 56, 6000)  # (код, brandId, поріг грн) — реф. дилерської ціни
 AUTONOVA_PROXY = os.environ.get("AUTONOVA_PROXY")  # напр. http://user:pass@ua-host:port
+
+# --- темп запитів і паралель (прискорення нічного прогону, 31.07) ---
+# Запити йдуть у кілька потоків, але спільний обмежувач тримає СУМАРНИЙ темп.
+# Виграш — з перекриття очікування мережі, а не з ударнішого навантаження.
+_RATE_LOCK = threading.Lock()
+_RATE_NEXT = [0.0]
+
+
+def _autonova_interval():
+    """Мінімальний проміжок між запитами (сумарно з усіх потоків), сек."""
+    try:
+        v = float(os.environ.get("AUTONOVA_MIN_INTERVAL") or 0.12)
+    except Exception:
+        v = 0.12
+    return v if v > 0 else 0.0
+
+
+def _autonova_workers():
+    """Скільки кодів питаємо одночасно. Менше = обережніше до autonova."""
+    try:
+        n = int(float(os.environ.get("AUTONOVA_WORKERS") or 6))
+    except Exception:
+        n = 6
+    return max(1, min(16, n))
+
+
+def _rate_gate():
+    """Пропускає не більше одного запиту на _autonova_interval() секунд —
+    спільно для ВСІХ потоків. Замінює колишній time.sleep(0.12) після кожного
+    запиту: темп той самий, але потоки чекають мережу паралельно."""
+    iv = _autonova_interval()
+    if iv <= 0:
+        return
+    with _RATE_LOCK:
+        now = time.monotonic()
+        wait = _RATE_NEXT[0] - now
+        if wait < 0.0:
+            wait = 0.0
+        _RATE_NEXT[0] = now + wait + iv
+    if wait > 0:
+        time.sleep(wait)
 
 
 def _autonova_opener():
@@ -71,6 +121,7 @@ def _autonova_fetch(product_id, cookie):
         "User-Agent": "Mozilla/5.0 (visimics-autopilot)",
     })
     for attempt in range(3):  # 520 у origin буває транзієнтним
+        _rate_gate()
         try:
             with _autonova_opener().open(req, timeout=8) as r:
                 return json.loads(r.read().decode("utf-8"))
@@ -237,6 +288,74 @@ def _all_brands():
     return [int(x) for x in (os.environ.get("AUTONOVA_BRANDS") or "1,72,56,59,81,16").split(",") if x.strip()]
 
 
+# --- пам'ять «під якою маркою шукати» (31.07) ---
+# Кешується ТІЛЬКИ brandId, тобто ДЕ шукати. Ціна, наявність і термін
+# НІКОЛИ не кешуються — вони щоразу тягнуться свіжими з autonova.
+_BRAND_LOCK = threading.Lock()
+_BRAND_MEMO = {}   # код (UPPER) -> brandId, під яким він знайшовся
+_BRAND_HITS = {}   # brandId -> скільки разів влучив за цей прогін
+
+
+def _memo_key(code):
+    return str(code).strip().upper()
+
+
+def _brand_reset():
+    """Скидає пам'ять марок (для тестів і повторних прогонів у одному процесі)."""
+    with _BRAND_LOCK:
+        _BRAND_MEMO.clear()
+        _BRAND_HITS.clear()
+
+
+def _brand_hit(code, bid):
+    with _BRAND_LOCK:
+        _BRAND_MEMO[_memo_key(code)] = bid
+        _BRAND_HITS[bid] = _BRAND_HITS.get(bid, 0) + 1
+
+
+def _brand_order(code, all_brands):
+    """Порядок перебору brandId для коду:
+      1) марка, під якою цей код уже знайшовся раніше в цьому прогоні;
+      2) підказка за форматом артикула (_autonova_brand_for);
+      3) решта марок — найрезультативніші за цей прогін попереду.
+    Результат перебору від порядку не залежить (перший, хто має ОРИГІНАЛ,
+    виграє в будь-якому порядку) — змінюється лише кількість запитів."""
+    with _BRAND_LOCK:
+        memo = _BRAND_MEMO.get(_memo_key(code))
+        hits = dict(_BRAND_HITS)
+    head = []
+    for b in (memo, _autonova_brand_for(code)):
+        if b is not None and b not in head:
+            head.append(b)
+    rest = [b for b in all_brands if b not in head]
+    rest.sort(key=lambda b: (-hits.get(b, 0), all_brands.index(b)))
+    return head + rest
+
+
+def _resolve_many(rows, cookie, all_brands, tag):
+    """Резолвить пачку кодів у кілька потоків (AUTONOVA_WORKERS).
+    rows — кортежі, де [0] = ключ (UPPER), [1] = код як у таблиці.
+    Віддає (row, item|None) СТРОГО у вхідному порядку, тож подальший запис
+    у таблицю лишається послідовним і в тому ж порядку, що й раніше.
+    Виняток на одному коді не валить решту прогону."""
+    workers = _autonova_workers()
+
+    def one(row):
+        try:
+            return _resolve_autonova(row[1], cookie, all_brands)
+        except Exception as e:
+            print(f"[{tag}] {row[0]}: {type(e).__name__}: {str(e)[:80]}")
+            return None
+
+    if workers <= 1 or len(rows) <= 1:
+        for row in rows:
+            yield row, one(row)
+        return
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for row, item in zip(rows, ex.map(one, rows)):
+            yield row, item
+
+
 def _av_parts(c):
     """Розбиває код на реальні номери autonova (пробіли прибрані, '+'/'-' -> окремі)."""
     raw = []
@@ -260,31 +379,30 @@ def _resolve_autonova(code, cookie, all_brands):
         sp = [cand_whole]
     if not sp:
         return None
-    guess = _autonova_brand_for(code)
-    order = ([guess] + [b for b in all_brands if b != guess]) if guess else all_brands
+    order = _brand_order(code, all_brands)
     res = None
     for bid in order:
+        # пауз тут більше нема: темп тримає _rate_gate() всередині _autonova_fetch
         if len(sp) >= 2:
             acc = [_autonova_code_best(p, bid, cookie) for p in sp]
-            for _ in sp:
-                time.sleep(0.12)
             if all(acc):
                 res = acc
-                break
             elif acc and acc[0]:
                 res = [acc[0]]
+            if res:
+                _brand_hit(code, bid)
                 break
         else:
             r = _autonova_code_best(sp[0], bid, cookie)
-            time.sleep(0.12)
             if r:
                 res = [r]
+                _brand_hit(code, bid)
                 break
             if cand_whole and cand_whole != sp[0]:
                 r2 = _autonova_code_best(cand_whole, bid, cookie)
-                time.sleep(0.12)
                 if r2:
                     res = [r2]
+                    _brand_hit(code, bid)
                     break
             # base_rev-фолбек (зрізання кінцевої літери ревізії) ПРИБРАНО 24.07:
             # це ІНШИЙ номер (інша ревізія/деталь) -> порушує правило «тільки оригінал».
@@ -307,20 +425,25 @@ def pull_autonova_web(codes, best, instock, cookie):
         return
     limit = int(num(os.environ.get("AUTONOVA_WEB_LIMIT") or 0))  # 0 = всі
     all_brands = _all_brands()
-    n_ok = n_avail = 0
-    seen = 0
+    todo, seen_k = [], set()
     for code in codes:
-        if limit and seen >= limit:
+        if limit and len(todo) >= limit:
             break
-        seen += 1
-        item = _resolve_autonova(code, cookie, all_brands)
+        k = str(code).strip().upper()
+        if k in seen_k:      # той самий код двічі — питати вдруге нема сенсу
+            continue
+        seen_k.add(k)
+        todo.append((k, code))
+    n_ok = n_avail = 0
+    for (k, _code), item in _resolve_many(todo, cookie, all_brands, "autonova-web"):
         if not item:
             continue
-        keep_best(best, str(code).strip().upper(), item, instock)
+        keep_best(best, k, item, instock)
         n_ok += 1
         if item["presence"] == "available":
             n_avail += 1
-    print(f"[autonova-web] додано {n_ok} кодів (у наявності: {n_avail}) з {seen} перевірених")
+    print(f"[autonova-web] додано {n_ok} кодів (у наявності: {n_avail}) з {len(todo)} перевірених; "
+          f"потоків {_autonova_workers()}")
 
 
 def recheck_autonova_faster(codes, best, instock, cookie, on_upgrade=None):
@@ -340,12 +463,14 @@ def recheck_autonova_faster(codes, best, instock, cookie, on_upgrade=None):
         return []
     limit = int(num(os.environ.get("AUTONOVA_RECHECK_LIMIT") or 0))  # 0 = усі
     all_brands = _all_brands()
-    upgraded = []
-    n_check = n_up = n_avail = 0
+    # 1) відбір — ТІ САМІ правила, що й раніше, до єдиного запиту в autonova
+    todo, seen_k = [], set()
     for code in codes:
-        if limit and n_check >= limit:
+        if limit and len(todo) >= limit:
             break
         k = str(code).strip().upper()
+        if k in seen_k:
+            continue
         cur = best.get(k)
         if not cur:
             continue
@@ -354,13 +479,15 @@ def recheck_autonova_faster(codes, best, instock, cookie, on_upgrade=None):
             # ПРІОРИТЕТ ПРАЙСУ BMW: «наяв»/«чекати 2-3д» — ціна BMW перша,
             # autonova навіть не питаємо (див. sources/base.py)
             continue
-        n_check += 1
+        seen_k.add(k)
         cur_days = int(num(cur.get("days"))) if cur.get("days") is not None else 15
-        try:
-            item = _resolve_autonova(code, cookie, all_brands)
-        except Exception as e:  # одна погана позиція не має валити всю крос-перевірку
-            print(f"[recheck] {k}: {type(e).__name__}: {str(e)[:80]}")
-            continue
+        todo.append((k, code, lock, cur_days))
+    # 2) запити — паралельно; 3) рішення і запис — послідовно, у вхідному порядку,
+    #    в головному потоці (on_upgrade пише в таблицю так само по одному)
+    upgraded = []
+    n_check = len(todo)
+    n_up = n_avail = 0
+    for (k, _code, lock, cur_days), item in _resolve_many(todo, cookie, all_brands, "recheck"):
         if not item:
             continue
         new_days = int(item.get("days") or 0)
@@ -381,5 +508,6 @@ def recheck_autonova_faster(codes, best, instock, cookie, on_upgrade=None):
                     on_upgrade(k)
                 except Exception as e:
                     print(f"[recheck] запис {k} не вдався: {str(e)[:80]}")
-    print(f"[recheck] autonova крос-перевірка: {n_check} перевірено, {n_up} прискорено (у наявності: {n_avail})")
+    print(f"[recheck] autonova крос-перевірка: {n_check} перевірено, {n_up} прискорено "
+          f"(у наявності: {n_avail}); потоків {_autonova_workers()}")
     return upgraded
