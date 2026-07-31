@@ -10,7 +10,8 @@ from common.bmparts_client import (cdn_url, clean_name, fitment_lines, oem_and_r
                                    parse_details)
 from common.pricing import final_price
 from repricing.export_writer import avail_cell
-from adding.ai_layer import ai_enrich, card_facts, merge_ai, repair_fields, repair_on
+from adding.ai_layer import (ai_enrich, card_facts, merge_ai, repair_fields,
+                             repair_on, scratch_facts)
 from adding import canon
 from adding.groups import map_place
 # Жорсткі межі Prom і Google лежать РІВНО В ОДНОМУ місці — adding/rules.py.
@@ -1046,6 +1047,55 @@ def product_from_candidate(c):
     return prod
 
 
+# ---------- Картка з нуля ----------
+def scratch_product(product, cand=None, use_ai=True):
+    """Позиція, якої нема в каталозі BM Parts: просимо ШІ відновити технічні
+    факти й дописуємо їх у product ТІЛЬКИ там, де порожньо. Повертає True, якщо
+    щось реально додали.
+
+    Порядок тут принциповий. Спершу факти, і лише потім увесь звичайний двигун
+    картки: після цієї функції product виглядає так, ніби ці дані прийшли з
+    каталогу, і далі працює той самий код, що й завжди — canon_chars сам зробить
+    «Сумісність з маркою/моделлю» і роки з cars, map_place сам знайде групу за
+    category. Другої гілки складання картки не з'являється, а отже нема чому
+    розійтися з першою.
+
+    Дані постачальника СИЛЬНІШІ за модель: усе пишеться лише в порожні поля.
+    Ціни, наявності й кількості це не торкається взагалі — вони належать
+    постачальнику, у якого купуємо (ЗАЛІЗНЕ ПРАВИЛО, adding/sources)."""
+    art = str(product.get("article") or (cand or {}).get("article") or "").strip()
+    brand = str(product.get("brand") or (cand or {}).get("brand") or "").strip()
+    got = scratch_facts(art, brand, product.get("name") or "", use_ai=use_ai)
+    if not got:
+        print(f"[add] з нуля {art}: ШІ не дав фактів — картка лишається порожньою")
+        return False
+    fit, chars, typ, cat = got
+    added = []
+    if fit and not product.get("cars"):
+        product["cars"] = list(fit)
+        added.append(f"сумісність {len(fit)}")
+    if chars:
+        det = dict(product.get("details") or {})
+        for (n, u, v) in chars:
+            k = f"{n} [{u}]" if u else n
+            if k not in det:
+                det[k] = v
+        if det != (product.get("details") or {}):
+            product["details"] = det
+            added.append(f"характеристики {len(chars)}")
+    if cat and not product.get("nodes"):
+        product["nodes"] = cat
+        added.append(f"категорія «{cat}»")
+    # Назву чіпаємо лише тоді, коли постачальник не дав узагалі нічого:
+    # сира назва з прайсу — це факт, а тип від моделі — здогад.
+    if typ and not str(product.get("name") or "").strip():
+        product["name"] = f"{typ} {brand}".strip()
+        added.append("назва")
+    if added:
+        print(f"[add] з нуля {art}: ШІ дав {', '.join(added)}")
+    return bool(added)
+
+
 # ---------- Складання повного набору полів ----------
 def build_fields(product, cand=None, use_ai=True):
     """product (+ кандидат) -> усі поля картки Prom.
@@ -1058,6 +1108,12 @@ def build_fields(product, cand=None, use_ai=True):
     Раніше тут стояло жорстке «Наявність»: «+» — тобто кожна нова позиція
     оголошувалась наявною, навіть якщо вона під замовлення."""
     art = str(product.get("article") or (cand or {}).get("article") or "").strip()
+    # КАРТКА З НУЛЯ — найпершим кроком, ще до назви й характеристик: далі весь
+    # звичайний двигун має бачити вже доповнений product, інакше факти від ШІ
+    # прийшли б після того, як картку вже зібрано, і нікуди б не потрапили.
+    scratch_ok = False
+    if use_ai and cand and cand.get("scratch"):
+        scratch_ok = scratch_product(product, cand, use_ai=True)
     name_ua = _name_for_prom(product.get("name"), art)
     name_ru = _name_for_prom(ua2ru(product.get("name") or ""), art)
     imgs = [cdn_url(p) for p in (product.get("images") or [])]
@@ -1115,8 +1171,13 @@ def build_fields(product, cand=None, use_ai=True):
         f["Код_маркування_(GTIN)"] = gt
     if use_ai:
         # thin=True — позиції, якої нема в каталозі BM Parts: фактів обмаль,
-        # тому профіль ШІ прямо забороняє вигадувати кузови, двигуни й роки
-        thin = bool(cand) and not cand.get("matched_bm")
+        # тому профіль ШІ прямо забороняє вигадувати кузови, двигуни й роки.
+        # Виняток — картка з нуля, якій ШІ вже відновив сумісність і
+        # характеристики: фактів тепер стільки ж, скільки в каталожної, і
+        # тримати її на «худому» профілі означало б заборонити писати про те,
+        # що вже лежить у фактах. Вигадки все одно не пройдуть: numbers_ok
+        # звіряє КОЖЕН номер, кузов і рік у назві саме з цими фактами.
+        thin = bool(cand) and not cand.get("matched_bm") and not scratch_ok
         ai = ai_enrich(product, clean_details, _fitment, thin=thin)  # без ключа -> None -> детермінік
         if ai:
             merge_ai(f, ai)

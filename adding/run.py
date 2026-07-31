@@ -2,14 +2,21 @@
 # -*- coding: utf-8 -*-
 """МОДУЛЬ «ДОДАВАННЯ ПОЗИЦІЙ» — точка входу (запуск: python -m adding.run).
 
-MODE=review : джерело з «Пульт_Додавання» -> кандидати -> «Огляд_Додавання»
+MODE=review : джерела з «Пульт_Додавання» -> кандидати -> «Огляд_Додавання»
               (фото, ціна, РІВЕНЬ повноти, чого бракує, галка «Взяти»).
 MODE=enrich : відмічені «Взяти» -> контент BM Parts -> card_builder -> ВАЛІДАТОР
               -> Export (лише рівень 1) або Staging_Prom (рівні 2 і 3).
+MODE=ai_scan: те саме, що enrich, але НІЧОГО НЕ ПИШЕ в Export і Staging —
+              лише проганяє відмічені позиції через увесь конвеєр (збірка,
+              валідатор, ШІ-аудит) і кладе присуд у колонку «Статус». Це
+              «примірка»: видно, що саме поїде і де проблема, ще до запису.
 MODE=panel  : лише створити/оновити пульт і вийти.
 MODE=ai_check : нічого не додає — по черзі пінгує КОЖНОГО ШІ-провайдера
               й каже, чий ключ живий, у кого ліміт, а чий не приймається
               (adding/ai_check.py). Товарних даних у запиті нема.
+
+Різниця ai_check і ai_scan одним рядком: ai_check перевіряє КЛЮЧІ, ai_scan —
+ПОЗИЦІЇ. Обидва нічого не змінюють у таблиці, крім клітинки статусу.
 
 Правила, які тут тримаються буквально:
   • ціна, валюта, наявність і кількість — від постачальника, у якого купуємо;
@@ -17,6 +24,7 @@ MODE=ai_check : нічого не додає — по черзі пінгує К
   • CRITICAL від валідатора в Export не потрапляє НІКОЛИ;
   • картка без фото не потрапляє в Export НІКОЛИ (рівень 3 -> Staging)."""
 import os
+import re
 
 import gspread
 
@@ -27,7 +35,7 @@ from common.sheets import find_ws, keyf, open_hub
 from adding.ai_layer import audit_card, audit_line, providers_ready
 from adding.card_builder import build_fields, product_from_candidate, repair_card
 from adding.completeness import level_card, route_card
-from adding.panel import ensure_panel, read_panel, write_status
+from adding.panel import brands_of, ensure_panel, read_panel, write_status
 from adding.review import do_review, parse_avail
 from adding.sources import candidate, key
 from adding.sources.bmparts_feed import stock_map
@@ -81,6 +89,21 @@ def _valid_card(f, chars, imgs, price, art):
             "section_url": f.get("Посилання_підрозділу")}
 
 
+def manual_photos(text):
+    """Колонка «Фото вручну (посилання)» -> список URL.
+
+    Навіщо вона. ШІ не вміє робити фотографії, а Prom не пропускає позицію без
+    жодного зображення. Тому для картки з нуля єдиний спосіб дотягти її до
+    Export — щоб власник вклеїв посилання на фото прямо в огляді. Розділювачі
+    ті самі, що всюди: кома, крапка з комою, пробіл, перенос рядка."""
+    out = []
+    for p in re.split(r"[\s,;|]+", str(text or "").strip()):
+        p = p.strip()
+        if p.lower().startswith(("http://", "https://")) and p not in out:
+            out.append(p)
+    return out
+
+
 def _cand_from_row(head_i, r):
     """Рядок «Огляд_Додавання» -> candidate(). Огляд — контракт між етапами:
     усе, що потрібно для ціни й наявності, вже лежить у рядку, тому прайс
@@ -99,6 +122,9 @@ def _cand_from_row(head_i, r):
         presence=presence,
         days=days,
         brand="",
+        # Фото власника мають пріоритет: bm_lookup ставить свої, лише коли
+        # список порожній, тож вручну вклеєне посилання нічим не затреться.
+        photos=manual_photos(g("Фото вручну (посилання)")),
     )
 
 
@@ -115,7 +141,18 @@ def _staging(sh, ex_head):
     return ws
 
 
-def do_enrich(sh, st):
+def do_enrich(sh, st, scan=False):
+    """Збірка карток за галками «Взяти».
+
+    scan=True — режим «примірка» (MODE=ai_scan, кнопка в таблиці). Проганяємо
+    рівно той самий конвеєр: довідник, card_builder, валідатор, ШІ-аудит,
+    ШІ-правка, маршрут. Різниця РІВНО одна — нічого не дописуємо ні в Export,
+    ні в Staging_Prom. Присуд лягає в колонку «Статус».
+
+    Чому саме прапорець, а не окрема функція перевірки: окрема функція неминуче
+    почала б судити інакше, ніж бойовий прогін, і перевірка перестала б щось
+    означати. Тут же власник бачить те саме рішення, яке ухвалить справжній
+    запуск."""
     rv = find_ws(sh, REVIEW_TAB)
     rows = rv.get_all_values()
     if not rows:
@@ -126,7 +163,7 @@ def do_enrich(sh, st):
         head_i.setdefault(keyf(h), i)
     hi = {name: head_i.get(keyf(name)) for name in
           ["Джерело", "Артикул", "Назва (як у джерелі)", "Собівартість, ₴",
-           "Наявність", "К-ть", "Взяти", "Статус"]}
+           "Наявність", "К-ть", "Взяти", "Статус", "Фото вручну (посилання)"]}
     if hi["Взяти"] is None or hi["Артикул"] is None:
         raise SystemExit(f"в «{REVIEW_TAB}» нема колонок «Взяти»/«Артикул» — "
                          f"перезапусти MODE=review")
@@ -156,8 +193,30 @@ def do_enrich(sh, st):
     # Свіжа наявність BM Parts: між оглядом і enrich могли минути дні.
     # Для позицій із прайсів наявність лишається та, що в огляді, — її джерело
     # прайс постачальника, а не BM Parts.
-    stock = stock_map(bm, st["brand"]) if (bm and any(
-        c["source"] == SRC_BMPARTS for _rn, c in selected)) else {}
+    # 31.07: марок тепер може бути кілька, тож фід читаємо по кожній і зливаємо
+    # в одну мапу. Раніше бралась одна st["brand"], і позиція іншої марки тихо
+    # лишалася зі старою наявністю з огляду.
+    stock = {}
+    if bm and any(c["source"] == SRC_BMPARTS for _rn, c in selected):
+        for br in brands_of(st):
+            try:
+                part = stock_map(bm, br)
+            except Exception as e:
+                print(f"[add] наявність {br}: помилка {str(e)[:70]}")
+                continue
+            print(f"[add] наявність BM Parts / {br}: {len(part)} позицій")
+            stock.update(part)
+
+    scratch_mode = st.get("scratch", "off")
+    # Куди можуть їхати картки з нуля. «staging» означає: навіть ідеальна
+    # картка з нуля лишається в чернетці — її ніхто не звіряв із реальністю.
+    scratch_target = st["target"] if scratch_mode == "export" else "staging"
+    if scratch_mode != "off":
+        print(f"[add] картка з нуля: увімкнено, максимум — "
+              f"{'Export' if scratch_mode == 'export' else 'Staging_Prom'}")
+    if scan:
+        print("[add] РЕЖИМ ПЕРЕВІРКИ (ai_scan): у таблицю нічого не дописується, "
+              "пишу лише «Статус»")
 
     use_ai = st.get("ai") != "Без ШІ"
     # МОВЧАННЯ ШІ МУСИТЬ БУТИ ВИДНО (27.07). У прогоні №18 у журналі не було
@@ -189,11 +248,21 @@ def do_enrich(sh, st):
                 continue
             if bm:
                 bm_lookup(bm, c)
-            if c["source"] == SRC_BMPARTS:
-                if not c["matched_bm"]:
+            # ПОЗИЦІЯ, ЯКОЇ НЕМА В КАТАЛОЗІ BM PARTS (31.07).
+            # Було: така позиція з джерела BM Parts просто зникала («continue»),
+            # а з прайсу постачальника йшла далі й лягала в чернетку майже
+            # порожньою. Тепер обидва випадки веде один прапорець c["scratch"]:
+            # card_builder попросить ШІ зібрати картку з нуля за окремими
+            # правилами. Вимкнено в пульті — поведінка стара, один в один.
+            if not c["matched_bm"]:
+                if c["source"] == SRC_BMPARTS and scratch_mode == "off":
                     mark[rn] = "нема в BM Parts"
                     print(f"[add] {art}: не знайдено в BM Parts")
                     continue
+                if scratch_mode != "off":
+                    c["scratch"] = True
+                    print(f"[add] {art}: нема в BM Parts — збираю картку з нуля")
+            if c["source"] == SRC_BMPARTS and c["matched_bm"]:
                 av, qt = stock.get(keyf(art), ("", ""))
                 if av:
                     c["presence"], c["days"] = parse_avail(av)
@@ -286,9 +355,15 @@ def do_enrich(sh, st):
             # групи», «нема підрозділу»), увійшли всередину route_card — тому
             # видалені: дублювати ту саму умову в двох місцях означає рано чи
             # пізно змінити її лише в одному.
+            # Картці з нуля стеля окрема: її зміст писала модель, а не каталог
+            # постачальника, тому за замовчуванням вона зупиняється в чернетці.
+            # Пустити такі одразу в Export можна лише свідомо — окремим пунктом
+            # пульта. Решта воріт (фото, група, підрозділ) працюють як завжди.
             dest, status = route_card(chars, imgs, f.get("Номер_групи"),
                                       f.get("Ідентифікатор_підрозділу"),
-                                      st["target"])
+                                      scratch_target if c.get("scratch") else st["target"])
+            if c.get("scratch"):
+                status = "з нуля: " + status
             # І ЩЕ ОДИН запобіжник — за каноном (27.07). Таблиця експорту
             # оголошена канонічним шаблоном, а в ній у кожної запчастини є
             # обов'язковий набір характеристик і «Код запчастини»: саме за цим
@@ -304,7 +379,12 @@ def do_enrich(sh, st):
             row = _row_from_fields(ex_head, f, chars)
             (to_export if dest == "export" else to_staging).append(row)
             seen.add(k)
-            mark[rn] = (f"{status} → {'Export' if dest == 'export' else 'Staging'}"
+            # У режимі перевірки статус пишемо в майбутньому часі: «поїде в…».
+            # Інакше власник побачив би «готово → Export» і був би певен, що
+            # рядок уже в таблиці, хоча ми свідомо нічого не записали.
+            arrow = "поїде в" if scan else "→"
+            mark[rn] = ((f"перевірка: " if scan else "")
+                        + f"{status} {arrow} {'Export' if dest == 'export' else 'Staging'}"
                         + ("" if verdict == "OK" else f" ({verdict[:60]})")
                         + (f" | {ai_note[:120]}" if ai_note else ""))
             print(f"[add] ✅ {art} | рівень {lv} | {name_ua[:38]} | ціна {price} | "
@@ -315,12 +395,16 @@ def do_enrich(sh, st):
             mark[rn] = "помилка"
             print(f"[add] {art}: ПОМИЛКА {e}")
 
-    if to_export and LIVE:
+    if scan:
+        print(f"[add] перевірка завершена: пішло б у Export {len(to_export)}, "
+              f"у Staging_Prom {len(to_staging)}. Нічого не записано — "
+              f"дивись колонку «Статус».")
+    elif to_export and LIVE:
         export.append_rows(to_export, value_input_option="RAW")
-        print(f"[add] ✅ дописано {len(to_export)} карток у «{export.title}» (БОЙОВА)")
+        print(f"[add] ✅ дописано {len(to_export)} карток у «{export.title}» (жива таблиця)")
     elif to_export:
         print(f"[add] DRY-RUN (LIVE=0): {len(to_export)} карток НЕ записано в Export")
-    if to_staging:
+    if to_staging and not scan:
         _staging(sh, ex_head).append_rows(to_staging, value_input_option="RAW")
         print(f"[add] ✅ дописано {len(to_staging)} карток у «{STAGING_TAB}» (на перевірку)")
     if not to_export and not to_staging:
@@ -336,8 +420,15 @@ def do_enrich(sh, st):
         ai_line = f" | ШІ: {usage_report()}"
     except Exception:
         ai_line = ""
-    write_status(sh, f"enrich: Export {len(to_export)}, Staging {len(to_staging)}, "
-                     f"відмічено {len(selected)}{ai_line}")
+    if scan:
+        write_status(sh, f"перевірка позицій: {len(selected)} відмічено, "
+                         f"пішло б у Export {len(to_export)}, у чернетку "
+                         f"{len(to_staging)}, не пройшли "
+                         f"{len(selected) - len(to_export) - len(to_staging)}"
+                         f"{ai_line}")
+    else:
+        write_status(sh, f"enrich: Export {len(to_export)}, Staging {len(to_staging)}, "
+                         f"відмічено {len(selected)}{ai_line}")
 
 
 def main():
@@ -358,14 +449,17 @@ def main():
     if MODE == "panel":
         ensure_panel(sh)
         return
-    # Пульт НЕ створюємо (власник видалив вкладку — вона й не повертається).
-    # Нема вкладки -> read_panel бере значення з воркфлоу. Повернути: mode=panel.
+    # 31.07: пульт знову створюється сам (усередині read_panel), якщо вкладки
+    # нема — керування має бути в таблиці, а не в полях воркфлоу.
     st = read_panel(sh)
     if MODE == "enrich":
         do_enrich(sh, st)
+    elif MODE in ("ai_scan", "ai-scan", "scan"):
+        do_enrich(sh, st, scan=True)
     else:
         _st, cands = do_review(sh, st)
-        write_status(sh, f"review: {len(cands)} кандидатів, джерело {st['source']}")
+        write_status(sh, f"review: {len(cands)} кандидатів, джерела "
+                         f"{', '.join(st.get('sources') or [st['source']])}")
 
 
 if __name__ == "__main__":

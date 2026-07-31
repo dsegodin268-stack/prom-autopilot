@@ -18,17 +18,22 @@ from common.config import (EXPORT_TAB, REVIEW_TAB, SRC_ALL, SRC_BMPARTS,
 from common.pricing import final_price
 from common.sheets import find_ws
 from adding.completeness import LEVEL_NAME, describe, level
-from adding.panel import read_panel
+from adding.panel import brands_of, read_panel, sources_of
 from adding.sources import dedup
 from adding.sources.bmparts_feed import candidates as bm_candidates
 from adding.sources.bmparts_feed import stock_map  # noqa: F401  (використовує run.py)
 from adding.sources.lookup import bm_lookup_many
 from adding.sources.supplier_book import candidates as book_candidates
 
+# Колонка «Фото вручну» додана в КІНЕЦЬ (P) свідомо: «Взяти» лишилось 14-м
+# стовпцем, а статус — 15-м, тож старі формули, чекбокси й Q1 не з'їхали.
 HEAD = ["Фото", "Джерело", "Артикул", "Назва (як у джерелі)", "Собівартість, ₴",
         "Ціна, ₴", "Наявність", "К-ть", "Рівень", "Чого бракує",
-        "Характеристики", "OEM", "Сумісність", "Взяти", "Статус"]
+        "Характеристики", "OEM", "Сумісність", "Взяти", "Статус",
+        "Фото вручну (посилання)"]
 C_TAKE = 13          # 0-based індекс колонки «Взяти» (для чекбокса)
+C_PHOTO_MAN = 15     # 0-based індекс колонки «Фото вручну (посилання)»
+LAST_COL = "P"       # остання літера колонки огляду (len(HEAD))
 LEVEL_BG = {1: (0.85, 0.94, 0.83), 2: (1.0, 0.95, 0.80), 3: (0.98, 0.85, 0.83)}
 
 
@@ -63,16 +68,31 @@ def _bm():
 
 
 def collect(st, ex_codes, bm=None):
-    """Пульт -> список кандидатів із потрібних джерел (уже без дублів)."""
-    src, lim = st["source"], st["max"]
+    """Пульт -> список кандидатів із потрібних джерел (уже без дублів).
+
+    31.07. Раніше джерело було рівно одне і марка рівно одна, тож за прогін
+    підтягувався лише BM Parts і лише BMW. Тепер пульт віддає СПИСКИ, і ми
+    проходимо всі джерела, а для BM Parts — усі марки. Ліміт `max` рахується на
+    ВЕСЬ прогін, а не на кожне джерело окремо: власник ставить у пульті «200» і
+    очікує 200 рядків в огляді, а не 200×кількість джерел."""
+    srcs, brands, lim = sources_of(st), brands_of(st), st["max"]
     out = []
-    if src in (SRC_BMPARTS, SRC_ALL):
+    if SRC_BMPARTS in srcs or SRC_ALL in srcs:
         bm = bm or _bm()
         if bm:
-            out += bm_candidates(bm, ex_codes, st["brand"], lim)
+            for br in brands:
+                if lim and len(out) >= lim:
+                    break
+                got = bm_candidates(bm, ex_codes, br, (lim - len(out)) if lim else 0)
+                print(f"[add] BM Parts / {br}: {len(got)} кандидатів")
+                out += got
     for name in SUPPLIER_BOOKS:
-        if src in (name, SRC_ALL):
-            out += book_candidates(name, ex_codes, lim)
+        if name in srcs or SRC_ALL in srcs:
+            if lim and len(out) >= lim:
+                break
+            got = book_candidates(name, ex_codes, (lim - len(out)) if lim else 0)
+            print(f"[add] {name}: {len(got)} кандидатів")
+            out += got
     out = dedup(out)
     if st.get("instock_only"):
         n = len(out)
@@ -96,7 +116,7 @@ def _row(c):
             avail_h(c.get("presence"), c.get("days"), c.get("qty")),
             c.get("qty") or "", LEVEL_NAME[level(c)], describe(c),
             chars, ", ".join((c.get("oem") or [])[:5]),
-            "; ".join((c.get("fitment") or [])[:3]), False, ""]
+            "; ".join((c.get("fitment") or [])[:3]), False, "", ""]
 
 
 def render(sh, cands):
@@ -104,9 +124,11 @@ def render(sh, cands):
     out = [HEAD] + [_row(c) for c in cands]
     n = len(out)
     rv.clear()
-    rv.update(values=out, range_name=f"A1:O{n}", value_input_option="USER_ENTERED")
+    rv.update(values=out, range_name=f"A1:{LAST_COL}{n}",
+              value_input_option="USER_ENTERED")
 
-    px = {0: 70, 1: 120, 2: 130, 3: 300, 8: 130, 9: 200, 10: 260, 12: 220}
+    px = {0: 70, 1: 120, 2: 130, 3: 300, 8: 130, 9: 200, 10: 260, 12: 220,
+          C_PHOTO_MAN: 320}
     reqs = [
         {"setDataValidation": {
             "range": {"sheetId": rv.id, "startRowIndex": 1, "endRowIndex": n,
