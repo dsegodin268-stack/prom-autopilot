@@ -7,6 +7,9 @@ MODE=review : джерело з «Пульт_Додавання» -> канди�
 MODE=enrich : відмічені «Взяти» -> контент BM Parts -> card_builder -> ВАЛІДАТОР
               -> Export (лише рівень 1) або Staging_Prom (рівні 2 і 3).
 MODE=panel  : лише створити/оновити пульт і вийти.
+MODE=ai_check : нічого не додає — по черзі пінгує КОЖНОГО ШІ-провайдера
+              й каже, чий ключ живий, у кого ліміт, а чий не приймається
+              (adding/ai_check.py). Товарних даних у запиті нема.
 
 Правила, які тут тримаються буквально:
   • ціна, валюта, наявність і кількість — від постачальника, у якого купуємо;
@@ -338,6 +341,19 @@ def do_enrich(sh, st):
 
 
 def main():
+    # ПЕРЕВІРКА ШІ — до відкриття таблиці. Це діагностика ключів, і вона мусить
+    # дійти до журналу навіть тоді, коли Google недоступний: інакше падіння
+    # доступу до таблиці виглядало б як «ШІ не працює», хоча ШІ ні до чого.
+    if MODE in ("ai_check", "ai-check"):
+        from adding.ai_check import run_check
+        sh = None
+        try:
+            sh = open_hub(os.environ.get("HUB_ID", ID_HUB))
+        except BaseException as e:
+            print(f"[ai-check] таблиця недоступна ({str(e)[:60]}) — звіт лише в журнал")
+        run_check(sh)
+        return
+
     sh = open_hub(os.environ.get("HUB_ID", ID_HUB))
     if MODE == "panel":
         ensure_panel(sh)
