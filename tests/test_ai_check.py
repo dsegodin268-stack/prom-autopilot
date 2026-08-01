@@ -229,3 +229,58 @@ def test_summary_shouts_when_nothing_works():
 def test_every_state_has_a_human_label():
     for st in set(chk.ALIVE) | {"no_key", "bad_key", "error", "no_acct"}:
         assert st in chk.LABEL and chk.LABEL[st].strip()
+
+
+# --------------------------------------------------- підказка живими назвами
+# Стан «жодна назва моделі не підійшла» без підказки — глухий кут: власник
+# бачить, що сходинка мертва, але не знає, чим замінити протухлу назву. Тому
+# на цьому стані ми питаємо у провайдера його ж список моделей.
+
+class _FakeResp(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_hint_takes_root_of_first_candidate():
+    """Фільтр «свої моделі» будується з першого кандидата провайдера."""
+    assert chk._hint("gemma") == "gemma"
+    assert chk._hint("gemini") == "gemini"
+    assert chk._hint("cloudflare") == "llama"   # «@cf/meta/llama-3.3-...»
+
+
+def test_available_models_strips_prefix_and_filters(monkeypatch):
+    """Google віддає «models/<назва>» — префікс зрізаємо, бо в запиті працює
+    коротка форма. І лишаємо лише схожі назви, щоб не вивалити весь каталог."""
+    payload = b'{"data":[{"id":"models/gemma-3-27b-it"},' \
+              b'{"id":"models/gemini-3.1-flash-lite"},' \
+              b'{"id":"models/gemma-3n-e4b-it"}]}'
+    monkeypatch.setattr(chk.urllib.request, "urlopen",
+                        lambda req, timeout=0: _FakeResp(payload))
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    assert chk._available_models("gemma") == ["gemma-3-27b-it", "gemma-3n-e4b-it"]
+
+
+def test_available_models_never_breaks_the_check(monkeypatch):
+    """Список — приємний бонус, а не умова роботи: якщо провайдер не дав його,
+    перевірка мусить спокійно віддати порожньо, а не впасти."""
+    def boom(req, timeout=0):
+        raise urllib.error.HTTPError("http://x", 404, "no", {}, io.BytesIO(b""))
+    monkeypatch.setattr(chk.urllib.request, "urlopen", boom)
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    assert chk._available_models("gemma") == []
+
+
+def test_no_model_state_carries_the_offer(monkeypatch):
+    """Наскрізь: усі кандидати дали 404 -> стан no_model і в ньому лежать
+    справжні назви, які провайдер визнає."""
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setattr(ai, "_post",
+                        lambda *a, **k: (_ for _ in ()).throw(_http(404)))
+    monkeypatch.setattr(chk, "_available_models", lambda prov, timeout=15:
+                        ["gemma-3-27b-it"])
+    r = chk.ping("gemma", timeout=1)
+    assert r["state"] == "no_model"
+    assert r["offer"] == ["gemma-3-27b-it"]
