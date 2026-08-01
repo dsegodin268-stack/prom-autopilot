@@ -14,7 +14,7 @@
 
 СУМАРНА БЕЗКОШТОВНА ЄМНІСТЬ (за звіреними лімітами, ~2500 токенів на запит):
     gemini flash-lite   500/добу      groq gpt-oss-120b   1000/добу
-    gemma-3-27b       ~8600/добу      cerebras gpt-oss     ~400/добу
+    gemma-4-31b       ~8600/добу      cerebras gpt-oss     ~400/добу
     mistral            ~1000/добу     nvidia              ~1000/добу
     scaleway           ~400 разово    cloudflare          ~200/добу
     openrouter           50/добу      cohere               ~33/добу
@@ -146,9 +146,12 @@ PROVIDERS = {
                4.2, 500),
     # Той самий ключ, інша модель: 14400 запитів/добу, 30 rpm, але 15000 tpm ->
     # реальна стеля ~6 запитів/хв. Це головний робочий кінь для повного каталогу.
+    # 01.08.2026: гілка gemma-3 знята з роздачі — усі три старі назви віддавали
+    # 404, і сходинка мовчки не працювала. Назви нижче взяті не з голови, а зі
+    # списку самого провайдера (MODE=ai_check, рядок «провайдер визнає»).
     "gemma": ("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
               "GEMINI_API_KEY",
-              ("gemma-3-27b-it", "gemma-3-27b-instruct", "gemma-3-12b-it"),
+              ("gemma-4-31b-it", "gemma-4-26b-a4b-it"),
               10.0, 8600),
     # Groq: на gpt-oss-120b 1000 запитів/добу і 8000 tpm -> ~3 запити/хв.
     "groq": ("https://api.groq.com/openai/v1/chat/completions",
