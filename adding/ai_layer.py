@@ -12,14 +12,35 @@
 Усі безкоштовні канали, крім Anthropic, сумісні з OpenAI chat/completions,
 тож це одна функція + таблиця ендпойнтів.
 
-СУМАРНА БЕЗКОШТОВНА ЄМНІСТЬ (за звіреними лімітами, ~2500 токенів на запит):
-    gemini flash-lite   500/добу      groq gpt-oss-120b   1000/добу
-    gemma-4-31b       ~8600/добу      cerebras gpt-oss     ~400/добу
-    mistral            ~1000/добу     nvidia              ~1000/добу
-    scaleway           ~400 разово    cloudflare          ~200/добу
-    openrouter           50/добу      cohere               ~33/добу
-    github               50/добу
--> увесь каталог 3913 позицій проходить за ОДНУ добу безкоштовно.
+01.08.2026 — ЧИСТКА СХОДІВ. Було 11 безкоштовних сходинок, лишилось 5. Причина
+проста: сходинка, яка не працює або не тягне каталог, це не запас, а брехня в
+звіті. Кожен прогін перевірки показував стіну «нема ключа» й «доступ закрито»,
+і за цією стіною не було видно двох сходинок, які реально роблять роботу.
+
+ЩО ПРИБРАНО І ЧОМУ (список звірено того ж дня з cheahjs/free-llm-api-resources,
+живий стан — з нашого ж MODE=ai_check):
+    cerebras   ключ у секретах Є, провайдер віддає HTTP 403 на кожен запит —
+               три прогони поспіль (#42, #43, #44). Доступ закритий на боці
+               провайдера, кодом це не лікується.
+    scaleway   у списку більше НЕ безкоштовний — переїхав у розділ «потрібна
+               картка або депозит». Безкоштовний грант був разовий.
+    cloudflare ~200 карток/добу і ДВА секрети замість одного (ID акаунта стоїть
+               у самій адресі). Ціна налаштування вища за користь.
+    openrouter 50 карток/добу.
+    github     ~50 карток/добу. Це той самий єдиний канал, через тісноту якого
+               й будувались сходи; тримати його як «запас» безглуздо.
+    cohere     1000 запитів на МІСЯЦЬ, тобто ~33 картки/добу.
+Останні чотири разом дають ~330 карток на добу при каталозі 3913. Це не запас,
+це видимість запасу. Правило тепер жорстке й перевіряється тестом: сходинка
+живе в таблиці, лише якщо тягне від 500 карток на добу.
+
+СУМАРНА БЕЗКОШТОВНА ЄМНІСТЬ, що лишилась (~2500 токенів на запит):
+    gemma-4-31b       ~8600/добу  ✅ живе, головний робочий кінь
+    gemini flash-lite   500/добу  ✅ живе, найкраща якість
+    groq gpt-oss-120b  1000/добу  ключа поки нема
+    mistral            ~1000/добу ключа поки нема
+    nvidia             ~1000/добу ключа поки нема
+-> самих лише двох живих сходинок вистачає на весь каталог 3913 за одну добу.
 
 Порядок задає AI_PROVIDERS (через кому). За замовчуванням — ORDER нижче:
 спершу найкраща якість, далі найбільша ємність, платний Anthropic — останній.
@@ -137,7 +158,12 @@ PROM_AI_SYSTEM_SCRATCH = (
 # мертвий. Тому пробуємо кандидатів по черзі й запам'ятовуємо ту, що відповіла
 # (_model_ok). Коштує це одну зайву відповідь 404 РАЗ на прогін, зате сходи
 # самі лікуються без правки коду. Примусово задати модель можна завжди:
-# AI_MODEL_<ПРОВАЙДЕР>, напр. AI_MODEL_GEMMA=gemma-3-12b-it.
+# AI_MODEL_<ПРОВАЙДЕР>, напр. AI_MODEL_GEMMA=gemma-4-31b-it.
+#
+# ПРАВИЛО ВІДБОРУ (01.08.2026). Сюди не додається сходинка, яка не тягне
+# щонайменше 500 карток на добу. Дрібні безкоштовні ліміти виглядають як запас,
+# а насправді лише засмічують звіт перевірки й вимагають зайвих секретів.
+# Це стереже тест test_ai_ladder.py::test_no_rung_too_small_to_matter.
 PROVIDERS = {
     # Google AI Studio. flash-lite: 500 запитів/добу, 15 rpm (у звичайного flash лише 20/добу).
     "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
@@ -154,52 +180,28 @@ PROVIDERS = {
               ("gemma-4-31b-it", "gemma-4-26b-a4b-it"),
               10.0, 8600),
     # Groq: на gpt-oss-120b 1000 запитів/добу і 8000 tpm -> ~3 запити/хв.
+    # llama-3.1-8b стоїть останнім кандидатом свідомо: якість нижча, зате в неї
+    # 14400 запитів/добу — це запасний хід, якщо старша модель піде в ліміт.
     "groq": ("https://api.groq.com/openai/v1/chat/completions",
              "GROQ_API_KEY",
-             ("openai/gpt-oss-120b", "llama-3.3-70b-versatile", "llama-3.3-70b"),
+             ("openai/gpt-oss-120b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"),
              20.0, 1000),
-    # Cerebras: 30 rpm / 60000 tpm, але стеля саме в ТОКЕНАХ — 1 млн/добу.
-    # 1 000 000 / ~2500 токенів на картку = ~400 карток, це і є наш добовий ліміт.
-    "cerebras": ("https://api.cerebras.ai/v1/chat/completions",
-                 "CEREBRAS_API_KEY", ("gpt-oss-120b", "llama-3.1-8b"), 12.5, 400),
     # Mistral: 1 запит/сек, великий місячний ліміт токенів.
+    # Увага при заведенні ключа: безкоштовний тариф вимагає згоди на навчання
+    # на ваших запитах. У запит не йде ні ціна, ні собівартість, ні умови
+    # постачальника (це залізне правило всього AI-шару), але знати варто.
     "mistral": ("https://api.mistral.ai/v1/chat/completions",
                 "MISTRAL_API_KEY", ("mistral-small-latest", "open-mistral-nemo"), 1.2, 0),
     # NVIDIA NIM: 40 rpm, добового ліміту не задекларовано.
     "nvidia": ("https://integrate.api.nvidia.com/v1/chat/completions",
                "NVIDIA_API_KEY",
                ("meta/llama-3.3-70b-instruct", "meta/llama-3.1-8b-instruct"), 1.6, 0),
-    # Scaleway: 1 млн безкоштовних токенів РАЗОВО -> ~400 карток усього, не щодня.
-    # Коли грант вичерпано, провайдер віддає 402 і сходи самі йдуть далі.
-    "scaleway": ("https://api.scaleway.ai/v1/chat/completions",
-                 "SCALEWAY_API_KEY",
-                 ("llama-3.3-70b-instruct", "gpt-oss-120b",
-                  "mistral-small-3.2-24b-instruct-2506"),
-                 2.0, 400),
-    # Cloudflare Workers AI: 10000 «нейронів»/добу. Нейрон — не запит: скільки їх
-    # з'їдає картка, залежить від моделі, тож точної арифметики тут бути не може.
-    # Ставимо свідомо занижені 200 і покладаємось на 402/429 — краще недобрати
-    # безкоштовного, ніж довбити провайдера в стелю. URL містить ID акаунта, тому
-    # ця сходинка вмикається лише разом із CF_ACCOUNT_ID (див. _url_for/_ladder).
-    "cloudflare": ("https://api.cloudflare.com/client/v4/accounts/{acct}/ai/v1/chat/completions",
-                   "CF_API_TOKEN",
-                   ("@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/google/gemma-3-12b-it",
-                    "@cf/mistralai/mistral-small-3.1-24b-instruct"),
-                   3.0, 200),
-    # OpenRouter: 20 rpm, 50 запитів/добу (1000/добу після поповнення на $10).
-    "openrouter": ("https://openrouter.ai/api/v1/chat/completions",
-                   "OPENROUTER_API_KEY",
-                   ("google/gemma-3-27b-it:free", "meta-llama/llama-3.3-70b-instruct:free"),
-                   3.2, 50),
-    # Cohere: 20 rpm, 1000 запитів/МІСЯЦЬ -> ~33/добу. OpenAI-сумісний шлях /compatibility/v1.
-    "cohere": ("https://api.cohere.ai/compatibility/v1/chat/completions",
-               "COHERE_API_KEY", ("command-a-03-2025", "command-r-plus"), 3.2, 33),
-    # GitHub Models: ліміт залежить від тарифу Copilot; у Free ~50/добу на high-моделях.
-    "github": ("https://models.github.ai/inference/chat/completions",
-               "GH_MODELS_TOKEN", ("openai/gpt-4.1", "openai/gpt-4o"), 6.5, 50),
 }
-ORDER = ["gemini", "gemma", "groq", "cerebras", "mistral", "nvidia",
-         "scaleway", "cloudflare", "openrouter", "cohere", "github", "anthropic"]
+ORDER = ["gemini", "gemma", "groq", "mistral", "nvidia", "anthropic"]
+
+# Мінімум карток на добу, нижче якого сходинка не має сенсу (0 = провайдер
+# добового ліміту не декларує, тобто стелі нема). Каталог — 3913 позицій.
+MIN_DAILY = 500
 
 _last_call = {}     # provider -> час останнього запиту
 _model_ok = {}      # provider -> назва моделі, що реально відповіла цього прогону
@@ -209,36 +211,23 @@ _memo = {}          # факти -> результат, щоб не платит
 
 
 def _url_for(prov):
-    """Адреса провайдера з підставленими змінними.
+    """Адреса провайдера.
 
-    Cloudflare — єдиний, у кого ID акаунта сидить у самому шляху, а не в заголовку.
-    Робимо це підстановкою, а не окремою гілкою у виклику, щоб решта коду й далі
-    бачила всіх провайдерів однаково. Порожній acct тут не страшний: _ladder такого
-    провайдера в сходи взагалі не пустить."""
-    url = PROVIDERS[prov][0]
-    if "{acct}" in url:
-        url = url.replace("{acct}", (os.environ.get("CF_ACCOUNT_ID") or "").strip())
-    if prov == "github" and os.environ.get("AI_API_URL"):
-        url = os.environ["AI_API_URL"]
-    return url
+    Раніше тут була підстановка ID акаунта в шлях (цього вимагав Cloudflare) і
+    підміна адреси через AI_API_URL (спадок тих часів, коли єдиним каналом були
+    GitHub Models). Обидві сходинки прибрано 01.08.2026, тож і обидві гілки
+    пішли: адреса тепер просто береться з таблиці. Функція лишилась, бо через
+    неї ходить увесь інший код і перевірка."""
+    return PROVIDERS[prov][0]
 
 
 def _ready(prov):
-    """Чи має провайдер усе, що йому треба для запиту.
-
-    Ключа мало, коли адреса параметризована: Cloudflare без CF_ACCOUNT_ID дасть
-    404 на кожен запит, і це виглядатиме як «нема моделі», хоча насправді просто
-    не заповнена адреса. Тому перевіряємо обидві умови ще на вході в сходи."""
+    """Чи має провайдер усе, що йому треба для запиту — тобто свій ключ."""
     if prov == "anthropic":
         return bool(os.environ.get("ANTHROPIC_API_KEY"))
     if prov not in PROVIDERS:
         return False
-    envk = PROVIDERS[prov][1]
-    if not (os.environ.get(envk) or (prov == "github" and os.environ.get("AI_TOKEN"))):
-        return False
-    if "{acct}" in PROVIDERS[prov][0] and not (os.environ.get("CF_ACCOUNT_ID") or "").strip():
-        return False
-    return True
+    return bool(os.environ.get(PROVIDERS[prov][1]))
 
 
 def _ladder():
@@ -252,17 +241,16 @@ def _models_for(prov):
     """Список моделей-кандидатів для провайдера, у порядку спроби.
 
     AI_MODEL_<PROV> перебиває все (і тоді список рівно з однієї моделі — власник
-    сказав явно, підбирати за нього не треба). Далі загальний AI_MODEL (лише для
-    github/anthropic, щоб не підсунути чужу назву решті). Далі — кандидати з
-    таблиці, з тією, що вже спрацювала цього прогону, попереду."""
+    сказав явно, підбирати за нього не треба). Загальний AI_MODEL діє лише на
+    anthropic: це спадок часів єдиного каналу, і підсунути цю назву решті
+    провайдерів означало б 404 на кожен запит. Далі — кандидати з таблиці, з
+    тією, що вже спрацювала цього прогону, попереду."""
     m = (os.environ.get("AI_MODEL_" + prov.upper()) or "").strip()
     if m:
         return [m]
-    m = (os.environ.get("AI_MODEL") or "").strip()
     if prov == "anthropic":
+        m = (os.environ.get("AI_MODEL") or "").strip()
         return [m if m.lower().startswith("claude") else "claude-sonnet-4-5"]
-    if m and prov == "github":
-        return [m]
     cands = PROVIDERS[prov][2]
     cands = [cands] if isinstance(cands, str) else list(cands)
     ok = _model_ok.get(prov)
@@ -325,7 +313,7 @@ def _openai_compat(prov, system, user_json):
     Помилки ліміту (429/402/403) НЕ ковтаємо — вони мають дійти до _ai_call,
     щоб той поставив провайдера в cooldown і пішов на наступну сходинку."""
     _u, envk, _m, pause, _cap = PROVIDERS[prov]
-    key = os.environ.get(envk) or os.environ.get("AI_TOKEN", "")
+    key = os.environ.get(envk, "")
     url = _url_for(prov)
     models = _models_for(prov)
     last = None
@@ -367,7 +355,7 @@ _REASONING = re.compile(
 
 
 def _json_obj(txt):
-    """Витягує JSON-об'єкт з відповіді моделі. None, якщо його там нема.
+    r"""Витягує JSON-об'єкт з відповіді моделі. None, якщо його там нема.
 
     НАВІЩО ОКРЕМА ФУНКЦІЯ. Раніше в чотирьох місцях стояло однакове
     re.search(r"\{.*\}") — жадібний захват від ПЕРШОЇ дужки до ОСТАННЬОЇ.

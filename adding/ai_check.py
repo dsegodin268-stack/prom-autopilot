@@ -46,7 +46,6 @@ LABEL = {
     "bad_key":  "❌ ключ не приймається",
     "no_model": "⚠️ ключ живий, але жодна назва моделі не підійшла",
     "no_key":   "— нема ключа",
-    "no_acct":  "⚠️ є CF_API_TOKEN, але нема CF_ACCOUNT_ID",
     "error":    "⚠️ не відповів",
 }
 # Стани, за яких провайдер реально дасть картку зараз.
@@ -108,7 +107,7 @@ def _available_models(prov, timeout=15):
     url = ai._url_for(prov)
     if not url.endswith("/chat/completions"):
         return []
-    key = os.environ.get(ai.PROVIDERS[prov][1]) or os.environ.get("AI_TOKEN", "")
+    key = os.environ.get(ai.PROVIDERS[prov][1], "")
     req = urllib.request.Request(
         url[:-len("/chat/completions")] + "/models",
         headers={"Authorization": "Bearer " + key})
@@ -142,8 +141,7 @@ def _request(prov, model, timeout):
                       "content-type": "application/json"}, timeout=timeout)
         return "".join(b.get("text", "") for b in d.get("content", [])
                        if b.get("type") == "text")
-    envk = ai.PROVIDERS[prov][1]
-    key = os.environ.get(envk) or os.environ.get("AI_TOKEN", "")
+    key = os.environ.get(ai.PROVIDERS[prov][1], "")
     # response_format тут НЕ ставимо: половина провайдерів віддає на нього 400,
     # і перевірка ключа перетворилась би на перевірку підтримки JSON-режиму.
     d = ai._post(ai._url_for(prov),
@@ -164,11 +162,6 @@ def ping(prov, timeout=25):
     res = {"prov": prov, "state": "no_key", "model": "", "detail": "",
            "answer": "", "offer": []}
     if not ai._ready(prov):
-        # Cloudflare без ID акаунта — це не «нема ключа», а недороблене
-        # налаштування; сказати про це прямо дешевше, ніж потім ловити 404.
-        if prov != "anthropic" and os.environ.get(ai.PROVIDERS[prov][1]) \
-                and "{acct}" in ai.PROVIDERS[prov][0]:
-            res["state"] = "no_acct"
         return res
 
     pause = 0.0 if prov == "anthropic" else min(ai.PROVIDERS[prov][3], 3.0)
@@ -230,7 +223,7 @@ def summary(results):
     """Один рядок для клітинки Q1 — коротко й без емодзі-каші."""
     ok = [r for r in results if r["state"] == "ok"]
     lim = [r for r in results if r["state"] in ("limit", "denied")]
-    bad = [r for r in results if r["state"] in ("bad_key", "no_model", "error", "no_acct")]
+    bad = [r for r in results if r["state"] in ("bad_key", "no_model", "error")]
     parts = []
     if ok:
         parts.append("працюють " + ", ".join(
