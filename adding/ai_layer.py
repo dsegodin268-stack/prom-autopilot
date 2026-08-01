@@ -361,6 +361,44 @@ def _retry_after(e, default):
     return default
 
 
+_REASONING = re.compile(
+    r"<\s*(thought|thinking|think|reasoning)\s*>.*?<\s*/\s*\1\s*>",
+    re.S | re.I)
+
+
+def _json_obj(txt):
+    """Витягує JSON-об'єкт з відповіді моделі. None, якщо його там нема.
+
+    НАВІЩО ОКРЕМА ФУНКЦІЯ. Раніше в чотирьох місцях стояло однакове
+    re.search(r"\{.*\}") — жадібний захват від ПЕРШОЇ дужки до ОСТАННЬОЇ.
+    Поки моделі відповідали самим JSON, це працювало. Нові моделі (gemma-4 і
+    подібні) спершу пишуть уголос свої роздуми — <thought>...</thought> — і
+    проговорюють там форму відповіді, разом із дужками. Жадібний захват
+    починався в роздумах, json.loads падав, і сходинка мовчки віддавала
+    порожньо. Ззовні це «ШІ не спрацював», хоча ключ живий і відповідь була.
+
+    ЯК ПРАЦЮЄ. Спершу прибираємо закриті блоки роздумів. Потім пробуємо кожну
+    «{» зліва направо: беремо шматок до останньої «}» і дивимось, чи це взагалі
+    розбирається. Перший, що розібрався, — і є відповідь. Незакритий тег
+    роздумів так само не заважає: його дужки просто не дадуть валідного JSON,
+    і ми поїдемо далі до справжньої відповіді."""
+    if not txt:
+        return None
+    txt = _REASONING.sub(" ", txt)
+    end = txt.rfind("}")
+    if end < 0:
+        return None
+    start = txt.find("{")
+    while 0 <= start < end:
+        try:
+            got = json.loads(txt[start:end + 1])
+        except Exception:
+            start = txt.find("{", start + 1)
+            continue
+        return got if isinstance(got, dict) else None
+    return None
+
+
 def _ai_call(system, user_json):
     """Йде сходами: 429/ліміт -> провайдер у cooldown, беремо наступного."""
     ladder = _ladder()
@@ -462,8 +500,7 @@ def enrich_facts(facts, thin=False):
         txt = _ai_call(PROM_AI_SYSTEM_THIN if thin else PROM_AI_SYSTEM, payload)
         if not txt:
             return None
-        mt = re.search(r"\{.*\}", txt, re.S)
-        ai = json.loads(mt.group(0)) if mt else None
+        ai = _json_obj(txt)
         if ai and not numbers_ok(ai, facts):
             return None
         _memo[key] = ai
@@ -542,8 +579,8 @@ def scratch_facts(article, brand="", name_src="", use_ai=True):
         txt = _ai_call(PROM_AI_SYSTEM_SCRATCH, payload)
         if not txt:
             return None
-        mt = re.search(r"\{.*\}", txt, re.S)
-        got = _scratch_clean(json.loads(mt.group(0)), art, brand) if mt else None
+        raw = _json_obj(txt)
+        got = _scratch_clean(raw, art, brand) if raw else None
     except Exception as e:
         print(f"[ai] з нуля: пропуск ({str(e)[:100]})")
         return None
@@ -811,10 +848,10 @@ def audit_card(f, chars=None, images=None, article="", group="", known=(), use_a
         txt = _ai_call(AUDIT_SYSTEM, payload)
         if not txt:
             return _canon_only(known)
-        mt = re.search(r"\{.*\}", txt, re.S)
-        if not mt:
+        raw = _json_obj(txt)
+        if raw is None:
             return _canon_only(known)
-        res = _norm_audit(json.loads(mt.group(0)))
+        res = _norm_audit(raw)
     except Exception as e:
         print(f"[ai] аудит пропущено ({str(e)[:100]})")
         return _canon_only(known)
@@ -914,8 +951,7 @@ def repair_fields(facts, issues, current=None, thin=False):
                        payload)
         if not txt:
             return None
-        mt = re.search(r"\{.*\}", txt, re.S)
-        ai = json.loads(mt.group(0)) if mt else None
+        ai = _json_obj(txt)
         if not ai:
             return None
         if not numbers_ok(ai, facts):
