@@ -160,3 +160,40 @@ def test_owner_photo_is_not_overwritten(monkeypatch):
 
     assert own["photos"] == ["https://owner/1.jpg"]   # своє не затерли
     assert empty["photos"] and empty["photos"] != own["photos"]  # порожнє — заповнили
+
+
+# ------------------------------------------- захист відповіді моделі з роздумами
+# 01.08.2026. Живий прогін показав: сходинка gemma ожила на моделі gemma-4-31b-it,
+# але та відповідає не самим JSON — спершу пише вголос свої роздуми в
+# <thought>...</thought> і проговорює там форму відповіді разом із дужками.
+# Старий жадібний re.search(r"\{.*\}") починав захват у роздумах, json.loads падав,
+# і сходинка мовчки віддавала порожньо — ззовні «ШІ не спрацював» при живому ключі.
+
+def test_reasoning_block_does_not_eat_the_answer():
+    """Дужка всередині роздумів більше не збиває витягування відповіді."""
+    txt = ('<thought>answer only with JSON like {"a": 1}\nдай подумаю</thought>\n'
+           '{"type": "фільтр масляний", "chars": []}')
+    assert ai._json_obj(txt) == {"type": "фільтр масляний", "chars": []}
+
+
+def test_unclosed_reasoning_tag_still_parses():
+    """Модель обірвала роздуми й одразу пішла в JSON — теж читається."""
+    assert ai._json_obj('<think>hmm {зламано\n{"ok": true}') == {"ok": True}
+
+
+def test_nested_objects_survive():
+    """Захват до ОСТАННЬОЇ дужки лишається правильним для вкладених об'єктів."""
+    assert ai._json_obj('{"a": {"b": 1}, "c": [{"d": 2}]}') == \
+        {"a": {"b": 1}, "c": [{"d": 2}]}
+
+
+def test_plain_and_fenced_answers():
+    """Чиста відповідь і відповідь у ```json-огорожі з текстом навколо."""
+    assert ai._json_obj('{"ok": 1}') == {"ok": 1}
+    assert ai._json_obj('Ось:\n```json\n{"ok": 1}\n```\nГотово.') == {"ok": 1}
+
+
+def test_no_json_returns_none_not_crash():
+    """Нема відповіді — чесне None, а не виняток, який завалив би прогін."""
+    for bad in ("вибачте, не можу", "", None, "[1, 2, 3]"):
+        assert ai._json_obj(bad) is None
