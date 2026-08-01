@@ -27,8 +27,10 @@ OK». Жодного артикулу, назви, ціни, собіварто�
 Сплутати «ключ поганий» і «ліміт» — найдорожча помилка діагностики: у першому
 випадку треба йти міняти секрет, у другому — не робити нічого.
 """
+import json
 import os
 import urllib.error
+import urllib.request
 
 from adding import ai_layer as ai
 
@@ -82,6 +84,53 @@ def _no_model(code, body):
     return code == 404 or "model" in body
 
 
+def _hint(prov):
+    """Слово, за яким упізнаємо «свої» моделі у списку провайдера.
+
+    Беремо перший корінь першого кандидата: «gemma-3-27b-it» -> «gemma»,
+    «@cf/meta/llama-3.3-70b» -> «llama». Це не точна наука, а фільтр, щоб
+    у звіт не висипався весь каталог із сотні назв."""
+    first = (ai.PROVIDERS.get(prov, ("", "", ("",)))[2] or ("",))[0]
+    tail = str(first).split("/")[-1]
+    return tail.split("-")[0].lower()
+
+
+def _available_models(prov, timeout=15):
+    """Які назви моделей провайдер визнає НАСПРАВДІ (список, не пінг).
+
+    НАВІЩО. Стан «жодна назва не підійшла» сам по собі — глухий кут: ключ
+    живий, сходинка мертва, а що вписати замість протухлої назви — невідомо.
+    Тут ми питаємо в самого провайдера його ж список і кладемо кілька схожих
+    назв прямо у звіт, щоб їх лишалось тільки скопіювати в AI_MODEL_<...>.
+
+    Це GET по OpenAI-сумісному шляху /models. Жодних даних товару, ціни чи
+    умов постачальника тут немає й бути не може — ми нічого не надсилаємо."""
+    url = ai._url_for(prov)
+    if not url.endswith("/chat/completions"):
+        return []
+    key = os.environ.get(ai.PROVIDERS[prov][1]) or os.environ.get("AI_TOKEN", "")
+    req = urllib.request.Request(
+        url[:-len("/chat/completions")] + "/models",
+        headers={"Authorization": "Bearer " + key})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            d = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return []
+    names = []
+    for m in (d.get("data") or []):
+        n = str(m.get("id") or "").strip()
+        # Google віддає ідентифікатори як «models/gemma-3-27b-it» — у запиті
+        # ж працює короткий вигляд, тому префікс одразу зрізаємо.
+        if n.startswith("models/"):
+            n = n[len("models/"):]
+        if n:
+            names.append(n)
+    hint = _hint(prov)
+    same = [n for n in names if hint in n.lower()]
+    return (same or names)[:8]
+
+
 def _request(prov, model, timeout):
     """Один пінг. Повертає текст відповіді або кидає HTTPError/Exception."""
     if prov == "anthropic":
@@ -112,7 +161,8 @@ def ping(prov, timeout=25):
     Моделі перебираємо так само, як бойові сходи: 404 «нема моделі» -> наступна
     назва. Помилки ліміту й ключа перебором НЕ лікуються — виходимо одразу,
     інакше один вичерпаний ключ дав би три однакові 429 замість одного."""
-    res = {"prov": prov, "state": "no_key", "model": "", "detail": "", "answer": ""}
+    res = {"prov": prov, "state": "no_key", "model": "", "detail": "",
+           "answer": "", "offer": []}
     if not ai._ready(prov):
         # Cloudflare без ID акаунта — це не «нема ключа», а недороблене
         # налаштування; сказати про це прямо дешевше, ніж потім ловити 404.
@@ -146,6 +196,7 @@ def ping(prov, timeout=25):
                 continue
             if _no_model(e.code, body):
                 res["state"], res["detail"] = "no_model", f"HTTP {e.code}"
+                res["offer"] = _available_models(prov)
                 return res
             res["state"], res["detail"] = "error", f"HTTP {e.code}"
             return res
@@ -157,6 +208,7 @@ def ping(prov, timeout=25):
         res["answer"] = str(txt or "").strip()[:40]
         return res
     res["state"] = "no_model"
+    res["offer"] = _available_models(prov)
     return res
 
 
@@ -210,6 +262,12 @@ def report(results):
         if not r.get("in_ladder", True) and r["state"] in ALIVE:
             line += "  [вимкнено через AI_PROVIDERS]"
         print(line)
+        # Підказка живими назвами: власнику лишається скопіювати одну з них,
+        # а не гадати, чим замінити протухлу назву моделі.
+        if r["state"] == "no_model" and r.get("offer"):
+            print(f"      провайдер визнає: {', '.join(r['offer'])}")
+            print(f"      постав AI_MODEL_{r['prov'].upper()}=<одна з них> "
+                  f"або впиши її в PROVIDERS")
     alive = [r["prov"] for r in results if r["state"] in ALIVE]
     work = [r["prov"] for r in results if r["state"] in GOOD]
     print(f"[ai-check] ключів у секретах: {len(alive)}; працює зараз: {len(work)}")
