@@ -24,7 +24,7 @@ BM Parts API        ─┘     sync_bmparts.yml → mirror ──►  окрем
 | `competitors/` | вручну (потребує playwright) | Скрапер цін конкурентів з Prom → вкладка `competitors` |
 | `common/` | — | Спільне ядро: **єдине ціноутворення**, нормалізація артикулів, Google-клієнти, клієнт BM Parts |
 | `tools/` | `python -m tools.bmparts_probe` (bmparts_probe.yml) | Проба одного артикула / BULK-прайсу |
-| `tests/` | `pytest tests/` (ci.yml на кожен push) | 132 тести: нормалізація, ціни, brandId, якір, формат Prom, рівні повноти, валідатор, **сходи ШІ-провайдерів** і **сухий прогін усього конвеєра додавання** на підробках (`tests/fakes.py`, без мережі) |
+| `tests/` | `pytest tests/` (ci.yml на кожен push) | 457 тестів: нормалізація, ціни, brandId, якір, формат Prom, рівні повноти, валідатор, **сходи ШІ-провайдерів** і **сухий прогін усього конвеєра додавання** на підробках (`tests/fakes.py`, без мережі) |
 
 ## Ключові правила
 
@@ -62,10 +62,15 @@ BM Parts API        ─┘     sync_bmparts.yml → mirror ──►  окрем
 
 Сходи ШІ-провайдерів (`adding/ai_layer.py`) — **кожен ключ необов'язковий**: якщо секрета нема,
 провайдер просто пропускається, а без жодного ключа картка лишається повністю детермінованою:
-`GEMINI_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `MISTRAL_API_KEY`, `NVIDIA_API_KEY`,
-`SCALEWAY_API_KEY`, `CF_API_TOKEN` + `CF_ACCOUNT_ID` (Cloudflare — потрібні ОБИДВА,
-бо ID акаунта стоїть у самій адресі), `OPENROUTER_API_KEY`, `COHERE_API_KEY`,
-`GH_MODELS_TOKEN`, `ANTHROPIC_API_KEY`.
+`GEMINI_API_KEY` (працює одразу на дві сходинки — gemini і gemma), `GROQ_API_KEY`,
+`MISTRAL_API_KEY`, `NVIDIA_API_KEY`, `ANTHROPIC_API_KEY` (платний, стоїть останнім).
+
+01.08.2026 зі сходів прибрано шість провайдерів: `CEREBRAS_API_KEY` (ключ живий, а провайдер
+віддає 403 на кожен запит), `SCALEWAY_API_KEY` (більше не безкоштовний), `CF_API_TOKEN` +
+`CF_ACCOUNT_ID`, `OPENROUTER_API_KEY`, `COHERE_API_KEY`, `GH_MODELS_TOKEN` (усі четверо разом —
+близько 330 карток на добу при каталозі 3913, тобто видимість запасу). Ці секрети більше ні на
+що не впливають, їх можна видалити з GitHub. Правило відбору тепер жорстке й стереже його тест:
+сходинка живе в таблиці, лише якщо тягне від 500 карток на добу (`ai_layer.MIN_DAILY`).
 
 Variables: `LIVE`, `LIVE_ONLY`, `BMPARTS_BRANDS`, `BMPARTS_TAB_LIMIT`, `AI_PROVIDERS` (порядок сходів).
 
