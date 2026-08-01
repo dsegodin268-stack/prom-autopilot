@@ -23,8 +23,7 @@ def clean(monkeypatch):
         d.clear()
     for k in list(ai.PROVIDERS):
         monkeypatch.delenv(ai.PROVIDERS[k][1], raising=False)
-    for k in ("AI_MODEL", "AI_PROVIDERS", "AI_TOKEN", "ANTHROPIC_API_KEY",
-              "AI_API_URL", "CF_ACCOUNT_ID"):
+    for k in ("AI_MODEL", "AI_PROVIDERS", "ANTHROPIC_API_KEY"):
         monkeypatch.delenv(k, raising=False)
     for p in ai.PROVIDERS:
         monkeypatch.delenv("AI_MODEL_" + p.upper(), raising=False)
@@ -54,6 +53,28 @@ def test_ladder_order_covers_all_providers_and_ends_with_anthropic():
     assert ai.ORDER[-1] == "anthropic", "платний Anthropic мусить бути ОСТАННІМ"
 
 
+def test_no_rung_too_small_to_matter():
+    """Правило чистки 01.08.2026, записане як тест.
+
+    До чистки в сходах жили сходинки на 33, 50 і 200 карток на добу. Разом вони
+    давали ~330 карток при каталозі 3913 — тобто не працювали, а лише займали
+    рядок у звіті перевірки й вимагали окремого секрета. Тепер сходинка або
+    тягне від MIN_DAILY карток на добу, або не декларує стелі взагалі (0)."""
+    for name, (_url, _env, _models, _pause, cap) in ai.PROVIDERS.items():
+        assert cap == 0 or cap >= ai.MIN_DAILY, (
+            f"{name}: {cap} карток/добу — замало, щоб бути сходинкою")
+
+
+def test_dead_providers_stay_deleted():
+    """Іменний список того, що прибрано, — щоб воно не повернулось випадково
+    разом із чиїмось «а давай про запас». Кожне ім'я тут має причину в шапці
+    ai_layer.py: 403, зникла безкоштовність або надто малий ліміт."""
+    for gone in ("cerebras", "scaleway", "cloudflare", "openrouter",
+                 "cohere", "github"):
+        assert gone not in ai.PROVIDERS, f"{gone} повернувся в сходи"
+        assert gone not in ai.ORDER
+
+
 def test_ladder_skips_providers_without_key(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "x")
     assert ai._ladder() == ["groq"]
@@ -71,37 +92,23 @@ def test_no_keys_means_no_ladder_and_no_call():
     assert ai._ai_call("sys", "{}") is None
 
 
-# ------------------------------------------- адреса з параметром (Cloudflare)
-def test_cloudflare_is_skipped_without_account_id(monkeypatch):
-    """Ключа мало: без ID акаунта адреса неповна, і кожен запит був би 404.
-    Краще не пускати сходинку взагалі, ніж витрачати на неї спробу."""
-    monkeypatch.setenv("CF_API_TOKEN", "x")
-    assert "cloudflare" not in ai._ladder()
-
-
-def test_cloudflare_joins_ladder_with_account_id(monkeypatch):
-    monkeypatch.setenv("CF_API_TOKEN", "x")
-    monkeypatch.setenv("CF_ACCOUNT_ID", "acc123")
-    assert ai._ladder() == ["cloudflare"]
-
-
-def test_account_id_is_substituted_into_url(monkeypatch):
-    monkeypatch.setenv("CF_ACCOUNT_ID", "acc123")
-    url = ai._url_for("cloudflare")
-    assert "{acct}" not in url and "/accounts/acc123/" in url
-
-
-def test_plain_providers_have_no_placeholder_in_url():
-    # Підстановка стосується лише Cloudflare; решта адрес мусить бути готовою.
+# ------------------------------------------------------------------- адреси
+def test_all_urls_are_ready_to_use():
+    """Жодного параметра в адресі не лишилось. Раніше Cloudflare тримав у шляху
+    ID акаунта — і саме через це вимагав другий секрет; сходинку прибрано, тож
+    підстановки більше нема ніде, і адреса завжди готова як є."""
     for name, (url, *_rest) in ai.PROVIDERS.items():
-        if name != "cloudflare":
-            assert "{" not in url, f"{name}: у адресі лишився параметр"
+        assert "{" not in url, f"{name}: у адресі лишився параметр"
+        assert ai._url_for(name) == url
 
 
-def test_github_url_override_still_works(monkeypatch):
-    monkeypatch.setenv("AI_API_URL", "https://example.test/v1/chat/completions")
-    assert ai._url_for("github") == "https://example.test/v1/chat/completions"
-    assert ai._url_for("groq") == ai.PROVIDERS["groq"][0]
+def test_key_is_the_only_condition_to_join_the_ladder(monkeypatch):
+    """Після чистки умова рівно одна — свій ключ. Ніяких других секретів."""
+    for name, (_url, envk, *_r) in ai.PROVIDERS.items():
+        assert not ai._ready(name)
+        monkeypatch.setenv(envk, "x")
+        assert ai._ready(name), f"{name}: ключ є, а сходинка не готова"
+        monkeypatch.delenv(envk)
 
 
 # --------------------------------------------------- підбір назви моделі
@@ -157,29 +164,29 @@ def test_rate_limit_is_not_swallowed_by_model_fallback(monkeypatch):
 
 
 def test_last_candidate_404_propagates(monkeypatch):
-    monkeypatch.setenv("COHERE_API_KEY", "x")
+    monkeypatch.setenv("MISTRAL_API_KEY", "x")
 
     def fake_post(url, body, headers, timeout=120):
         raise _http(404, b'{"error":"model gone"}')
 
     monkeypatch.setattr(ai, "_post", fake_post)
     with pytest.raises(urllib.error.HTTPError):
-        ai._openai_compat("cohere", "sys", "{}")
+        ai._openai_compat("mistral", "sys", "{}")
 
 
 def test_explicit_model_override_disables_the_search(monkeypatch):
     # Якщо власник назвав модель явно — підбирати за нього нічого не треба.
-    monkeypatch.setenv("AI_MODEL_GEMMA", "gemma-3-12b-it")
-    assert ai._models_for("gemma") == ["gemma-3-12b-it"]
+    monkeypatch.setenv("AI_MODEL_GEMMA", "gemma-4-31b-it")
+    assert ai._models_for("gemma") == ["gemma-4-31b-it"]
 
 
 def test_general_ai_model_does_not_leak_to_other_providers(monkeypatch):
-    """AI_MODEL історично налаштовував GitHub Models. Якщо ним підмінити модель
-    у Groq чи Gemini — вони віддадуть 404 на кожен запит."""
+    """AI_MODEL — спадок часів, коли каналом були лише GitHub Models. Ту
+    сходинку прибрано, тож тепер загальна назва діє РІВНО на anthropic: підсунь
+    її Gemini чи Groq — і вони віддадуть 404 на кожен запит."""
     monkeypatch.setenv("AI_MODEL", "openai/gpt-4.1")
-    assert ai._models_for("github") == ["openai/gpt-4.1"]
-    assert "openai/gpt-4.1" not in ai._models_for("gemini")
-    assert "openai/gpt-4.1" not in ai._models_for("groq")
+    for prov in ai.PROVIDERS:
+        assert "openai/gpt-4.1" not in ai._models_for(prov), prov
 
 
 def test_anthropic_model_is_always_a_claude(monkeypatch):
@@ -190,8 +197,8 @@ def test_anthropic_model_is_always_a_claude(monkeypatch):
 # ------------------------------------------------------------ перемикання
 def test_ai_call_moves_to_next_provider_on_limit(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "x")
-    monkeypatch.setenv("COHERE_API_KEY", "y")
-    monkeypatch.setenv("AI_PROVIDERS", "groq,cohere")
+    monkeypatch.setenv("MISTRAL_API_KEY", "y")
+    monkeypatch.setenv("AI_PROVIDERS", "groq,mistral")
     seen = []
 
     def fake_compat(prov, system, user_json):
@@ -202,15 +209,15 @@ def test_ai_call_moves_to_next_provider_on_limit(monkeypatch):
 
     monkeypatch.setattr(ai, "_openai_compat", fake_compat)
     assert ai._ai_call("sys", "{}") == '{"ok":1}'
-    assert seen == ["groq", "cohere"]
+    assert seen == ["groq", "mistral"]
     assert ai._cooldown.get("groq", 0) > 0, "провайдер з лімітом мусить піти в паузу"
-    assert ai._used.get("cohere") == 1
+    assert ai._used.get("mistral") == 1
 
 
 def test_daily_cap_stops_provider(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "x")
-    monkeypatch.setenv("AI_PROVIDERS", "openrouter")
-    ai._used["openrouter"] = ai.PROVIDERS["openrouter"][4]
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+    monkeypatch.setenv("AI_PROVIDERS", "gemini")
+    ai._used["gemini"] = ai.PROVIDERS["gemini"][4]
     monkeypatch.setattr(ai, "_openai_compat",
                         lambda *a: pytest.fail("вибраний ліміт — виклику бути не мало"))
     assert ai._ai_call("sys", "{}") is None
@@ -218,8 +225,8 @@ def test_daily_cap_stops_provider(monkeypatch):
 
 def test_usage_report_names_the_model_that_worked():
     ai._used["gemma"] = 7
-    ai._model_ok["gemma"] = "gemma-3-12b-it"
-    assert "gemma:7" in ai.usage_report() and "gemma-3-12b-it" in ai.usage_report()
+    ai._model_ok["gemma"] = "gemma-4-31b-it"
+    assert "gemma:7" in ai.usage_report() and "gemma-4-31b-it" in ai.usage_report()
 
 
 def test_usage_report_when_ai_never_ran():

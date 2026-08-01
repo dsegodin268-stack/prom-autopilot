@@ -348,7 +348,6 @@ def test_providers_ready_is_empty_without_any_key(monkeypatch):
     from adding.ai_layer import ORDER, PROVIDERS, providers_ready
     monkeypatch.delenv("AI_PROVIDERS", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("AI_TOKEN", raising=False)
     for prov in ORDER:
         if prov in PROVIDERS:
             monkeypatch.delenv(PROVIDERS[prov][1], raising=False)
@@ -376,7 +375,6 @@ def test_the_owner_is_told_when_the_ai_never_ran(monkeypatch, capsys):
 
     monkeypatch.delenv("AI_PROVIDERS", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("AI_TOKEN", raising=False)
     for prov in ORDER:
         if prov in PROVIDERS:
             monkeypatch.delenv(PROVIDERS[prov][1], raising=False)

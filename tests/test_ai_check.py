@@ -26,8 +26,7 @@ def clean(monkeypatch):
     for k in list(ai.PROVIDERS):
         monkeypatch.delenv(ai.PROVIDERS[k][1], raising=False)
         monkeypatch.delenv("AI_MODEL_" + k.upper(), raising=False)
-    for k in ("AI_MODEL", "AI_PROVIDERS", "AI_TOKEN", "ANTHROPIC_API_KEY",
-              "AI_API_URL", "CF_ACCOUNT_ID"):
+    for k in ("AI_MODEL", "AI_PROVIDERS", "ANTHROPIC_API_KEY"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(ai, "_throttle", lambda prov, pause: None)
     yield
@@ -85,11 +84,11 @@ def test_no_key_means_no_request(monkeypatch):
 
 
 def test_ok_reports_working_model(monkeypatch):
-    monkeypatch.setenv("CEREBRAS_API_KEY", "k")
+    monkeypatch.setenv("NVIDIA_API_KEY", "k")
     monkeypatch.setattr(ai, "_post", lambda *a, **k: _reply("OK"))
-    r = chk.ping("cerebras")
+    r = chk.ping("nvidia")
     assert r["state"] == "ok"
-    assert r["model"] == ai.PROVIDERS["cerebras"][2][0]
+    assert r["model"] == ai.PROVIDERS["nvidia"][2][0]
     assert r["answer"] == "OK"
 
 
@@ -100,15 +99,18 @@ def test_429_is_limit_not_bad_key(monkeypatch):
 
 
 def test_402_is_limit(monkeypatch):
-    monkeypatch.setenv("SCALEWAY_API_KEY", "k")
+    monkeypatch.setenv("MISTRAL_API_KEY", "k")
     monkeypatch.setattr(ai, "_post", lambda *a, **k: (_ for _ in ()).throw(_http(402)))
-    assert chk.ping("scaleway")["state"] == "limit"
+    assert chk.ping("mistral")["state"] == "limit"
 
 
 def test_403_is_denied_not_bad_key(monkeypatch):
-    monkeypatch.setenv("CEREBRAS_API_KEY", "k")
+    """Саме на цьому діагнозі 01.08.2026 злетіла сходинка cerebras: ключ живий,
+    а провайдер закрив доступ на своєму боці. Стан лишається — він відрізняє
+    «міняй секрет» від «тут кодом уже нічого не вдієш»."""
+    monkeypatch.setenv("GROQ_API_KEY", "k")
     monkeypatch.setattr(ai, "_post", lambda *a, **k: (_ for _ in ()).throw(_http(403)))
-    assert chk.ping("cerebras")["state"] == "denied"
+    assert chk.ping("groq")["state"] == "denied"
 
 
 def test_401_is_bad_key(monkeypatch):
@@ -159,14 +161,6 @@ def test_limit_does_not_burn_other_model_names(monkeypatch):
                         lambda *a, **k: (calls.append(1), (_ for _ in ()).throw(_http(429)))[0])
     chk.ping("gemini")
     assert len(calls) == 1
-
-
-def test_cloudflare_without_account_id_says_so(monkeypatch):
-    """Токен є, а ID акаунта нема — адреса неповна. Це окремий діагноз, бо
-    інакше сходинка мовчки віддає 404 і виглядає як «нема моделі»."""
-    monkeypatch.setenv("CF_API_TOKEN", "k")
-    r = chk.ping("cloudflare")
-    assert r["state"] == "no_acct"
 
 
 def test_network_error_is_error_not_bad_key(monkeypatch):
@@ -227,7 +221,7 @@ def test_summary_shouts_when_nothing_works():
 
 
 def test_every_state_has_a_human_label():
-    for st in set(chk.ALIVE) | {"no_key", "bad_key", "error", "no_acct"}:
+    for st in set(chk.ALIVE) | {"no_key", "bad_key", "error"}:
         assert st in chk.LABEL and chk.LABEL[st].strip()
 
 
@@ -248,7 +242,7 @@ def test_hint_takes_root_of_first_candidate():
     """Фільтр «свої моделі» будується з першого кандидата провайдера."""
     assert chk._hint("gemma") == "gemma"
     assert chk._hint("gemini") == "gemini"
-    assert chk._hint("cloudflare") == "llama"   # «@cf/meta/llama-3.3-...»
+    assert chk._hint("nvidia") == "llama"   # «meta/llama-3.3-70b-instruct»
 
 
 def test_available_models_strips_prefix_and_filters(monkeypatch):
