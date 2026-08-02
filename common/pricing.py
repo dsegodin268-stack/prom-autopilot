@@ -17,7 +17,7 @@ def final_price(cost):
     c = num(cost)
     if c <= 0:
         return 0
-    k = 1.5 if c < 3000 else 1.45 if c < 5000 else 1.3 if c < 10000 else 1.2 if c < 30000 else 1.1
+    k = 1.4 if c < 3000 else 1.40 if c < 5000 else 1.2 if c < 10000 else 1.15 if c < 30000 else 1.1
     return int(math.ceil(max(c * k, c + MIN_MARKUP_ABS)))
 
 
