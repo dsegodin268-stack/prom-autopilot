@@ -1,7 +1,7 @@
 name: nightly-reprice
 on:
   schedule:
-    - cron: "23 5 * * *"   # ~08:23 Київ
+    - cron: "23 5 * /2 * *"   # ~08:23 Київ
   workflow_dispatch:
     inputs:
       live:
